@@ -1,0 +1,47 @@
+# ML & Quantitative Trading Research Project
+# Requirements for ML-assisted parameter optimization study
+
+# Core Data Processing
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Technical Analysis
+ta-lib>=0.4.28
+pandas-ta>=0.3.14b
+
+# Machine Learning & Optimization
+scikit-learn>=1.3.0
+scikit-optimize>=0.9.0  # Bayesian optimization
+optuna>=3.4.0  # Alternative Bayesian optimization
+deap>=1.4.1  # Evolutionary algorithms
+
+# Statistics & Analysis
+statsmodels>=0.14.0
+arch>=6.2.0  # GARCH models for volatility
+
+# Visualization (for research analysis)
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.18.0
+
+# Data Validation
+pydantic>=2.5.0
+
+# Real-time Data
+python-binance>=1.0.19
+websocket-client>=1.6.0
+aiohttp>=3.9.0
+
+# Utilities
+python-dotenv>=1.0.0
+tqdm>=4.66.0
+joblib>=1.3.0
+
+# Logging & Serialization
+loguru>=0.7.0
+orjson>=3.9.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0

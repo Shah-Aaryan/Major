@@ -1,0 +1,4 @@
+2026-01-31 23:55:36,571 | WARNING | data.loader | Data directory does not exist: data\raw
+2026-01-31 23:56:41,007 | WARNING | data.loader | Data directory does not exist: data\raw
+2026-01-31 23:57:56,587 | WARNING | data.loader | Data directory does not exist: data\raw
+2026-01-31 23:58:10,837 | INFO | __main__ | Paper trading mode
