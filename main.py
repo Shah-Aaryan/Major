@@ -139,9 +139,36 @@ Examples:
     )
     
     parser.add_argument(
+        '--walk-forward',
+        action='store_true',
+        help='Enable walk-forward validation (re-optimizes parameters periodically)'
+    )
+    
+    parser.add_argument(
+        '--wf-windows',
+        type=int,
+        default=5,
+        help='Number of walk-forward windows (default: 5)'
+    )
+    
+    parser.add_argument(
+        '--wf-train-ratio',
+        type=float,
+        default=0.8,
+        help='Train/test split ratio for each window (default: 0.8)'
+    )
+    
+    parser.add_argument(
         '--paper-trade',
         action='store_true',
-        help='Run paper trading simulation'
+        help='Run paper trading simulation with ML-optimized parameters'
+    )
+    
+    parser.add_argument(
+        '--replay-speed',
+        type=float,
+        default=60.0,
+        help='Simulation speed multiplier (default: 60 = 1hr data per minute)'
     )
     
     # Output arguments
@@ -213,12 +240,17 @@ def run_research_pipeline(args):
     logger.info(f"Strategies: {strategies}")
     logger.info(f"Timeframes: {timeframes}")
     logger.info(f"Optimization trials: {n_trials}")
+    if args.walk_forward:
+        logger.info(f"Walk-Forward Mode: {args.wf_windows} windows, {args.wf_train_ratio:.0%} train ratio")
     
     # Run research
     session = pipeline.run_full_research(
         data_paths=data_paths,
         timeframes=timeframes,
-        strategies=strategies
+        strategies=strategies,
+        walk_forward=args.walk_forward,
+        wf_windows=args.wf_windows,
+        wf_train_ratio=args.wf_train_ratio
     )
     
     # Print summary
@@ -253,15 +285,19 @@ def run_research_pipeline(args):
 
 
 def run_paper_trading(args):
-    """Run paper trading simulation."""
-    logger.info("Paper trading mode")
+    """Run paper trading simulation with ML-optimized parameters."""
+    logger.info("Paper trading mode - 1 minute timeframe")
     
     from realtime.binance_websocket import SimulatedWebSocket
     from realtime.live_feature_updater import LiveFeatureUpdater
     from realtime.paper_trader import PaperTrader, PaperTradingSession
     from strategies.rsi_mean_reversion import RSIMeanReversionStrategy
     from config.settings import FeatureConfig
+    from datetime import datetime
     import pandas as pd
+    import json
+    from pathlib import Path
+    import time
     
     # Load historical data for simulation
     if not args.data:
@@ -273,21 +309,66 @@ def run_paper_trading(args):
         data['timestamp'] = pd.to_datetime(data['timestamp'])
         data.set_index('timestamp', inplace=True)
     
-    # Create components
+    # Load ML-optimized parameters from latest session
+    ml_params = None
+    output_dir = Path(args.output)
+    session_files = sorted(output_dir.glob("session_*.json"), reverse=True)
+    
+    if session_files:
+        try:
+            with open(session_files[0]) as f:
+                session_data = json.load(f)
+            
+            # Find RSI strategy result
+            for result in session_data.get('results', []):
+                if result.get('strategy_name') == 'rsi_mean_reversion':
+                    ml_params = result.get('ml_params')
+                    logger.info(f"Loaded ML parameters from: {session_files[0].name}")
+                    break
+        except Exception as e:
+            logger.warning(f"Could not load ML parameters: {e}")
+    
+    # Create strategy with ML params
+    strategy = RSIMeanReversionStrategy()
+    
+    if ml_params:
+        strategy.set_strategy_specific_params(ml_params)
+        print("\n" + "="*60)
+        print("USING ML-OPTIMIZED PARAMETERS:")
+        print("="*60)
+        for param, value in ml_params.items():
+            if isinstance(value, float):
+                print(f"  {param}: {value:.4f}")
+            else:
+                print(f"  {param}: {value}")
+        print("="*60 + "\n")
+    else:
+        print("\n[INFO] Using default human parameters (no ML optimization found)\n")
+    
+    # Create components for 1-minute data
     websocket = SimulatedWebSocket(
         historical_data=data,
         symbol=args.symbol,
-        replay_speed=10.0  # 10x speed for testing
+        replay_speed=args.replay_speed  # User-configurable speed
     )
     
     feature_updater = LiveFeatureUpdater(
         symbols=[args.symbol],
         feature_config=FeatureConfig(),
-        min_warmup_candles=100
+        min_warmup_candles=50  # Reduced for 1m timeframe
     )
     
-    strategy = RSIMeanReversionStrategy()
-    paper_trader = PaperTrader(initial_capital=100000)
+    # Get stop loss and take profit from ML params or defaults
+    stop_loss = ml_params.get('stop_loss_pct', 2.0) / 100 if ml_params else 0.02
+    take_profit = ml_params.get('take_profit_pct', 4.0) / 100 if ml_params else 0.04
+    position_size = ml_params.get('position_size_pct', 10.0) / 100 if ml_params else 0.1
+    
+    paper_trader = PaperTrader(
+        initial_capital=100000,
+        position_size_pct=position_size,
+        default_stop_loss_pct=stop_loss,
+        default_take_profit_pct=take_profit
+    )
     
     # Create session
     session = PaperTradingSession(
@@ -297,38 +378,67 @@ def run_paper_trading(args):
         paper_trader=paper_trader
     )
     
+    print(f"\n{'='*60}")
+    print("LIVE PAPER TRADING SIMULATION (1-MINUTE TIMEFRAME)")
+    print(f"{'='*60}")
+    print(f"Symbol: {args.symbol}")
+    print(f"Data: {args.data}")
+    print(f"Initial Capital: $100,000")
+    print(f"Stop Loss: {stop_loss*100:.1f}%")
+    print(f"Take Profit: {take_profit*100:.1f}%")
+    print(f"Position Size: {position_size*100:.1f}%")
+    print(f"{'='*60}")
+    print("Press Ctrl+C to stop\n")
+    
     logger.info(f"Starting paper trading simulation for {args.symbol}")
-    logger.info("Press Ctrl+C to stop")
     
     try:
         session.start()
         
         # Wait for completion
-        import time
+        last_print_time = time.time()
         while websocket._running:
             time.sleep(1)
-            stats = session.get_session_stats()
-            if stats['trading_stats']['total_trades'] > 0:
-                print(f"Trades: {stats['trading_stats']['total_trades']}, "
-                      f"P&L: ${stats['trading_stats']['total_pnl']:.2f}")
+            
+            # Print status every 5 seconds
+            if time.time() - last_print_time > 5:
+                stats = session.get_session_stats()
+                trading_stats = stats.get('trading_stats', {})
+                
+                print(f"\r[{datetime.now().strftime('%H:%M:%S')}] "
+                      f"Trades: {trading_stats.get('total_trades', 0)}, "
+                      f"P&L: ${trading_stats.get('total_pnl', 0):.2f}, "
+                      f"Win Rate: {trading_stats.get('win_rate', 0)*100:.1f}%", end='')
+                
+                last_print_time = time.time()
     
     except KeyboardInterrupt:
-        logger.info("Stopping paper trading...")
+        logger.info("\nStopping paper trading...")
     
     finally:
         session.stop()
     
     # Print results
     metrics = paper_trader.get_performance_metrics()
-    print("\n" + "="*60)
+    print("\n\n" + "="*60)
     print("PAPER TRADING RESULTS")
     print("="*60)
     print(f"Total Trades: {metrics['n_trades']}")
+    print(f"Winning Trades: {metrics.get('n_winning', 0)}")
+    print(f"Losing Trades: {metrics.get('n_losing', 0)}")
     print(f"Win Rate: {metrics['win_rate']:.1%}")
     print(f"Total Return: ${metrics['total_return']:.2f} ({metrics['total_return_pct']:.2f}%)")
     print(f"Sharpe Ratio: {metrics['sharpe_ratio']:.2f}")
     print(f"Max Drawdown: {metrics['max_drawdown']:.2%}")
     print("="*60)
+    
+    # Show trade log
+    if paper_trader.closed_trades:
+        print("\nTRADE LOG:")
+        for trade in paper_trader.closed_trades[-10:]:  # Last 10 trades
+            print(f"  {trade.entry_time.strftime('%m/%d %H:%M')} -> {trade.exit_time.strftime('%H:%M')}: "
+                  f"{trade.side.value.upper()} @ {trade.entry_price:.2f} -> {trade.exit_price:.2f} "
+                  f"P&L: ${trade.pnl:.2f} ({trade.pnl_pct:+.1f}%) [{trade.exit_reason}]")
 
 
 def main():

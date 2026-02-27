@@ -202,7 +202,10 @@ class ResearchPipeline:
         data_paths: List[str],
         symbols: Optional[List[str]] = None,
         timeframes: List[str] = ['1m', '5m', '15m'],
-        strategies: Optional[List[str]] = None
+        strategies: Optional[List[str]] = None,
+        walk_forward: bool = False,
+        wf_windows: int = 5,
+        wf_train_ratio: float = 0.8
     ) -> ResearchSession:
         """
         Run complete research pipeline.
@@ -212,6 +215,9 @@ class ResearchPipeline:
             symbols: Symbols to analyze (auto-detect if None)
             timeframes: Timeframes to test
             strategies: Strategy names to test (all if None)
+            walk_forward: If True, use walk-forward validation (re-optimize periodically)
+            wf_windows: Number of walk-forward windows
+            wf_train_ratio: Train/test ratio for each window
             
         Returns:
             ResearchSession with all results
@@ -254,12 +260,24 @@ class ResearchPipeline:
                 
                 for strategy_name in strategies:
                     try:
-                        result = self._run_single_experiment(
-                            symbol=symbol,
-                            timeframe=timeframe,
-                            ohlcv=resampled,
-                            strategy_name=strategy_name
-                        )
+                        if walk_forward:
+                            # Walk-forward validation: re-optimize at each window
+                            result = self._run_walk_forward_experiment(
+                                symbol=symbol,
+                                timeframe=timeframe,
+                                ohlcv=resampled,
+                                strategy_name=strategy_name,
+                                n_windows=wf_windows,
+                                train_ratio=wf_train_ratio
+                            )
+                        else:
+                            # Single optimization on entire dataset
+                            result = self._run_single_experiment(
+                                symbol=symbol,
+                                timeframe=timeframe,
+                                ohlcv=resampled,
+                                strategy_name=strategy_name
+                            )
                         self.current_session.results.append(result)
                         
                     except Exception as e:
@@ -352,10 +370,16 @@ class ResearchPipeline:
         # Run ML optimization
         logger.info("Running ML optimization...")
         opt_start = time.time()
-        ml_params, best_optimizer = self._run_optimization(
+        ml_params, best_optimizer, adjustment_result = self._run_optimization(
             strategy, data_with_features, human_params
         )
         opt_time = time.time() - opt_start
+        
+        # Print ML parameter adjustment summary with reasoning
+        if adjustment_result:
+            print("\n" + "="*70)
+            print(adjustment_result.summary())
+            print("="*70 + "\n")
         
         # Run backtest with ML parameters
         logger.info("Running backtest with ML parameters...")
@@ -414,6 +438,166 @@ class ResearchPipeline:
             optimization_time=opt_time,
             total_time=total_time,
             report_path=report_path
+        )
+    
+    def _run_walk_forward_experiment(
+        self,
+        symbol: str,
+        timeframe: str,
+        ohlcv: pd.DataFrame,
+        strategy_name: str,
+        n_windows: int = 5,
+        train_ratio: float = 0.8
+    ) -> ResearchResult:
+        """
+        Run walk-forward validation experiment.
+        
+        This re-optimizes parameters at each window, simulating realistic
+        trading conditions where parameters adapt over time.
+        """
+        logger.info(f"Running WALK-FORWARD experiment: {symbol}/{timeframe}/{strategy_name}")
+        logger.info(f"  Windows: {n_windows}, Train ratio: {train_ratio:.0%}")
+        start_time = time.time()
+        
+        # Create strategy
+        strategy = self._create_strategy(strategy_name)
+        
+        # Generate features
+        data_with_features = self.feature_engine.generate_features(ohlcv, drop_na=False)
+        data_with_features = data_with_features.ffill().bfill()
+        data_with_features = data_with_features.dropna(subset=['open', 'high', 'low', 'close', 'volume'])
+        
+        if len(data_with_features) < 500:
+            raise ValueError(f"Insufficient data for walk-forward: {len(data_with_features)} rows (need 500+)")
+        
+        # Get human baseline parameters
+        human_params = strategy.parameters.to_dict()
+        
+        # Create optimize function for walk-forward validator
+        def optimize_func(train_data: pd.DataFrame) -> Dict[str, Any]:
+            """Optimize parameters on training window."""
+            param_bounds = strategy.get_parameter_bounds()
+            
+            def objective(strategy_name: str, params: Dict[str, Any], data: pd.DataFrame) -> float:
+                strategy.update_parameters(params)
+                from backtesting.backtest_engine import BacktestConfig as BtConfig
+                bt_config = BtConfig(
+                    initial_capital=self.strategy_config.initial_capital,
+                    commission_pct=self.strategy_config.trading_fee_pct,
+                    slippage_pct=self.backtest_config.slippage_pct
+                )
+                backtest = BacktestEngine(config=bt_config)
+                result = backtest.run(strategy, data)
+                return result.metrics.sharpe_ratio if result.metrics else 0.0
+            
+            adjuster = MLParameterAdjuster(
+                objective_function=objective,
+                strategy_bounds={strategy.__class__.__name__: param_bounds},
+                verbose=False  # Less verbose for walk-forward
+            )
+            
+            from optimization.ml_parameter_adjuster import OptimizationMethod
+            result = adjuster.optimize_strategy(
+                strategy_name=strategy.__class__.__name__,
+                train_data=train_data,
+                method=OptimizationMethod.BAYESIAN,
+                human_params=human_params,
+                n_iterations=max(10, self.optimization_config.bayesian_n_calls // n_windows)  # Fewer trials per window
+            )
+            
+            return result.ml_params or human_params
+        
+        # Create walk-forward validator
+        from backtesting.walk_forward import WalkForwardValidator
+        from backtesting.backtest_engine import BacktestConfig as BtConfig
+        
+        bt_config = BtConfig(
+            initial_capital=self.strategy_config.initial_capital,
+            commission_pct=self.strategy_config.trading_fee_pct,
+            slippage_pct=self.backtest_config.slippage_pct
+        )
+        
+        validator = WalkForwardValidator(
+            strategy=strategy,
+            optimize_function=optimize_func,
+            backtest_config=bt_config,
+            baseline_params=human_params
+        )
+        
+        # Run walk-forward analysis
+        wf_result = validator.run(
+            data=data_with_features,
+            n_windows=n_windows,
+            train_ratio=train_ratio,
+            anchored=False,
+            min_train_size=100
+        )
+        
+        # Print walk-forward summary
+        print("\n" + "="*70)
+        print("WALK-FORWARD VALIDATION RESULTS")
+        print("="*70)
+        print(wf_result.summary())
+        
+        # Print per-window parameter changes
+        print("\nPER-WINDOW PARAMETER EVOLUTION:")
+        for window in wf_result.windows:
+            print(f"\n  Window {window.window_id + 1}: {window.train_start.date()} to {window.test_end.date()}")
+            print(f"    Train Sharpe: {window.train_metrics.sharpe_ratio:.2f}")
+            print(f"    Test Sharpe:  {window.test_metrics.sharpe_ratio:.2f}")
+            print(f"    ML Improvement: {window.ml_improvement:+.1%}")
+            
+            # Show key parameter changes
+            if window.optimized_params and human_params:
+                key_params = ['rsi_lookback', 'stop_loss_pct', 'position_size_pct', 'rsi_buy_threshold']
+                changes = []
+                for p in key_params:
+                    if p in window.optimized_params and p in human_params:
+                        h_val = human_params[p]
+                        m_val = window.optimized_params[p]
+                        if h_val != 0:
+                            pct = ((m_val - h_val) / abs(h_val)) * 100
+                            changes.append(f"{p}: {h_val}->{m_val:.1f} ({pct:+.0f}%)")
+                if changes:
+                    print(f"    Key changes: {', '.join(changes[:3])}")
+        
+        print("="*70 + "\n")
+        
+        total_time = time.time() - start_time
+        
+        # Get final window's optimized params as the "ML params"
+        final_params = wf_result.windows[-1].optimized_params if wf_result.windows else human_params
+        
+        # Calculate improvements
+        improvements = {
+            'sharpe_ratio': wf_result.avg_ml_improvement,
+            'consistency': wf_result.ml_consistency
+        }
+        
+        return ResearchResult(
+            strategy_name=strategy_name,
+            symbol=symbol,
+            timeframe=timeframe,
+            human_metrics={
+                'sharpe_ratio': wf_result.aggregate_baseline_metrics.sharpe_ratio,
+                'total_return': wf_result.aggregate_baseline_metrics.total_return
+            },
+            ml_metrics={
+                'sharpe_ratio': wf_result.aggregate_test_metrics.sharpe_ratio,
+                'total_return': wf_result.aggregate_test_metrics.total_return,
+                'ml_consistency': wf_result.ml_consistency,
+                'overfitting_ratio': wf_result.overfitting_ratio
+            },
+            improvement=improvements,
+            human_params=human_params,
+            ml_params=final_params,
+            best_optimizer='walk_forward_bayesian',
+            failures_detected=0,
+            ml_recommended=wf_result.ml_consistency > 0.5,  # ML helps in >50% of windows
+            confidence=wf_result.ml_consistency,
+            optimization_time=total_time,
+            total_time=total_time,
+            report_path=""
         )
     
     def _create_strategy(self, strategy_name: str):
@@ -543,7 +727,7 @@ class ResearchPipeline:
             improvement=result.improvement_pct / 100 if result.improvement_pct else 0
         ))
         
-        return result.ml_params or human_params, result.optimization_method or "bayesian"
+        return result.ml_params or human_params, result.optimization_method or "bayesian", result
     
     def _analyze_conditions(
         self,

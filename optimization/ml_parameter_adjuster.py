@@ -147,19 +147,200 @@ class ParameterAdjustmentResult:
             f"  Improvement:    {self.improvement_pct:+.2f}%",
             f"  ML Helped:      {'YES' if self.ml_helped else 'NO'}",
             "",
-            "PARAMETER CHANGES:"
+            "PARAMETER CHANGES:",
         ]
         
-        for param, change in self.parameter_changes.items():
+        # Sort by absolute change percentage (biggest changes first)
+        sorted_changes = sorted(
+            self.parameter_changes.items(),
+            key=lambda x: abs(x[1]['change_pct']),
+            reverse=True
+        )
+        
+        for param, change in sorted_changes:
+            human_val = change['human']
+            ml_val = change['ml']
+            change_pct = change['change_pct']
+            
+            # Generate reasoning for each parameter change
+            reason = self._get_change_reason(param, human_val, ml_val, change_pct)
+            
             lines.append(
-                f"  {param}: {change['human']} -> {change['ml']} "
-                f"({change['change_pct']:+.1f}%)"
+                f"  {param}: {human_val} -> {ml_val} "
+                f"({change_pct:+.1f}%)"
             )
+            if reason:
+                lines.append(f"    └─ REASON: {reason}")
         
         if self.failure_reason:
             lines.append(f"\nFAILURE REASON: {self.failure_reason}")
         
+        # Add summary insight
+        lines.append("")
+        lines.append("KEY INSIGHTS:")
+        lines.extend(self._generate_insights())
+        
         return "\n".join(lines)
+    
+    def _get_change_reason(self, param: str, human_val: Any, ml_val: Any, change_pct: float) -> str:
+        """Generate reasoning for a specific parameter change."""
+        
+        # RSI parameters
+        if param == 'rsi_lookback':
+            if ml_val > human_val:
+                return "Longer lookback reduces noise and false signals in volatile market"
+            else:
+                return "Shorter lookback captures faster momentum shifts"
+        
+        elif param == 'rsi_buy_threshold':
+            if ml_val < human_val:
+                return "Lower threshold waits for deeper oversold conditions (more conservative entry)"
+            else:
+                return "Higher threshold enters earlier to catch more reversals"
+        
+        elif param == 'rsi_sell_threshold':
+            if ml_val > human_val:
+                return "Higher threshold waits for stronger overbought signals"
+            else:
+                return "Lower threshold exits earlier to lock in profits"
+        
+        # Risk management
+        elif param == 'stop_loss_pct':
+            if ml_val < human_val:
+                return "Tighter stop loss reduces downside risk per trade"
+            else:
+                return "Wider stop loss avoids premature exits from noise"
+        
+        elif param == 'take_profit_pct':
+            if ml_val > human_val:
+                return "Higher take profit targets larger moves (better risk/reward)"
+            else:
+                return "Lower take profit secures gains faster"
+        
+        elif param == 'trailing_stop_pct':
+            if ml_val < human_val:
+                return "Tighter trailing stop locks in profits during reversals"
+            else:
+                return "Wider trailing stop allows trends to develop"
+        
+        # Position sizing
+        elif param == 'position_size_pct':
+            if ml_val > human_val:
+                return "Larger position size increases exposure when strategy is confident"
+            else:
+                return "Smaller position size reduces risk during uncertainty"
+        
+        # Timing
+        elif param == 'entry_confirmation':
+            if ml_val > human_val:
+                return "More confirmation candles filter out false breakouts"
+            else:
+                return "Fewer confirmation for faster entry on clear signals"
+        
+        elif param == 'cooldown_period':
+            if ml_val > human_val:
+                return "Longer cooldown prevents overtrading in choppy conditions"
+            else:
+                return "Shorter cooldown captures more opportunities"
+        
+        elif param == 'max_holding_time':
+            if ml_val > human_val:
+                return "Longer holding time lets winning trades run further"
+            else:
+                return "Shorter holding avoids extended drawdowns"
+        
+        # ADX/Trend filters
+        elif param == 'adx_threshold':
+            if ml_val > human_val:
+                return "Higher ADX threshold ensures stronger trend confirmation"
+            else:
+                return "Lower ADX threshold allows trades in weaker trends"
+        
+        elif param == 'min_rsi_slope':
+            if ml_val > human_val:
+                return "Positive slope requirement filters for momentum direction"
+            else:
+                return "Negative slope allows contrarian entries on pullbacks"
+        
+        # EMA parameters
+        elif 'ema_fast' in param or 'fast_period' in param:
+            if ml_val < human_val:
+                return "Shorter fast EMA responds quicker to price changes"
+            else:
+                return "Longer fast EMA smooths out noise"
+        
+        elif 'ema_slow' in param or 'slow_period' in param:
+            if ml_val > human_val:
+                return "Longer slow EMA provides stronger trend baseline"
+            else:
+                return "Shorter slow EMA adapts faster to trend changes"
+        
+        # Bollinger Band parameters
+        elif 'bb_period' in param:
+            if ml_val > human_val:
+                return "Longer BB period creates more stable bands"
+            else:
+                return "Shorter BB period reacts faster to volatility"
+        
+        elif 'bb_std' in param:
+            if ml_val > human_val:
+                return "Wider bands reduce false breakout signals"
+            else:
+                return "Narrower bands identify earlier breakout opportunities"
+        
+        # Generic fallback
+        if abs(change_pct) < 5:
+            return "Minor tuning within similar range (marginal optimization)"
+        elif abs(change_pct) > 50:
+            return "Major adjustment indicates original value was suboptimal for this data"
+        else:
+            return "Moderate adjustment based on backtest performance"
+    
+    def _generate_insights(self) -> List[str]:
+        """Generate key insights from parameter changes."""
+        insights = []
+        
+        if not self.parameter_changes:
+            return ["  No parameter changes to analyze"]
+        
+        # Find biggest changes
+        biggest_change = max(
+            self.parameter_changes.items(),
+            key=lambda x: abs(x[1]['change_pct'])
+        )
+        
+        insights.append(
+            f"  • Largest change: {biggest_change[0]} "
+            f"({biggest_change[1]['change_pct']:+.1f}%)"
+        )
+        
+        # Risk management changes
+        risk_params = ['stop_loss_pct', 'take_profit_pct', 'position_size_pct']
+        risk_changes = [
+            (p, self.parameter_changes[p]['change_pct'])
+            for p in risk_params if p in self.parameter_changes
+        ]
+        
+        if risk_changes:
+            total_risk_change = sum(abs(c[1]) for c in risk_changes)
+            if total_risk_change > 30:
+                insights.append(
+                    "  • ML significantly adjusted risk parameters "
+                    "(strategy may have been too aggressive/conservative)"
+                )
+        
+        # Improvement summary
+        if self.ml_helped:
+            insights.append(
+                f"  • ML optimization IMPROVED performance by {self.improvement_pct:.1f}%"
+            )
+        else:
+            insights.append(
+                f"  • ML optimization did NOT significantly improve "
+                f"(human params already near-optimal)"
+            )
+        
+        return insights
 
 
 class MLParameterAdjuster:
