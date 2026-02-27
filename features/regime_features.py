@@ -412,12 +412,18 @@ def _calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
     up_move = high - high.shift(1)
     down_move = low.shift(1) - low
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = pd.Series(
+        np.where((up_move > down_move) & (up_move > 0), up_move, 0),
+        index=df.index
+    )
+    minus_dm = pd.Series(
+        np.where((down_move > up_move) & (down_move > 0), down_move, 0),
+        index=df.index
+    )
     
     atr = tr.ewm(span=period, adjust=False).mean()
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, adjust=False).mean() / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, adjust=False).mean() / atr
+    plus_di = 100 * plus_dm.ewm(span=period, adjust=False).mean() / atr
+    minus_di = 100 * minus_dm.ewm(span=period, adjust=False).mean() / atr
     
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = dx.ewm(span=period, adjust=False).mean()

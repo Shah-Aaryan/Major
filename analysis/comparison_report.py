@@ -166,7 +166,7 @@ class ComparisonReport:
             md.append("### Most Impactful Parameters")
             for param in self.most_impactful_params[:5]:
                 change = self.parameter_changes.get(param, {})
-                md.append(f"- **{param}**: {change.get('human', 'N/A')} → {change.get('ml', 'N/A')}")
+                md.append(f"- **{param}**: {change.get('human', 'N/A')} -> {change.get('ml', 'N/A')}")
             md.append("")
         
         # Recommendations

@@ -47,6 +47,18 @@ class DataLoader:
         if not self.data_dir.exists():
             logger.warning(f"Data directory does not exist: {self.data_dir}")
     
+    def load_csv(self, file_path: Union[str, Path]) -> pd.DataFrame:
+        """
+        Load OHLCV data directly from a CSV file path.
+        
+        Args:
+            file_path: Path to the CSV file
+            
+        Returns:
+            DataFrame with OHLCV data, indexed by timestamp
+        """
+        return self._load_csv(Path(file_path))
+    
     def list_available_files(self) -> List[str]:
         """List all CSV files in the data directory."""
         if not self.data_dir.exists():

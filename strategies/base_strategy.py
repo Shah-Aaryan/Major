@@ -252,6 +252,17 @@ class BaseStrategy(ABC):
         self.current_capital = initial_capital
         self.peak_capital = initial_capital
     
+    def update_parameters(self, params: Dict[str, Any]) -> None:
+        """
+        Update strategy parameters.
+        
+        Args:
+            params: Dictionary of parameter names and values to update
+        """
+        for key, value in params.items():
+            if hasattr(self.parameters, key):
+                setattr(self.parameters, key, value)
+    
     @abstractmethod
     def generate_signal(
         self,

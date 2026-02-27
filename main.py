@@ -227,6 +227,14 @@ def run_research_pipeline(args):
     print("="*60)
     
     summary = session.get_summary()
+    
+    if 'session_id' not in summary:
+        print(f"Status: {summary.get('status', 'unknown')}")
+        print("No experiments were completed successfully.")
+        print(f"\nCheck logs for details: {args.output}/")
+        print("="*60)
+        return session
+    
     print(f"Session ID: {summary['session_id']}")
     print(f"Experiments: {summary['n_experiments']}")
     print(f"ML Recommended: {summary['ml_recommended_count']} ({summary['ml_recommended_pct']:.1%})")

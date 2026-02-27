@@ -279,10 +279,10 @@ class DataPreprocessor:
                 )
             
             # Forward fill with limit
-            df[col] = df[col].fillna(method='ffill', limit=self.forward_fill_limit)
+            df[col] = df[col].ffill(limit=self.forward_fill_limit)
             
             # Backward fill remaining (at the start)
-            df[col] = df[col].fillna(method='bfill', limit=self.forward_fill_limit)
+            df[col] = df[col].bfill(limit=self.forward_fill_limit)
         
         # Drop rows that still have NaN in critical columns
         critical_cols = ['open', 'high', 'low', 'close']
@@ -362,7 +362,7 @@ class DataPreprocessor:
         # Handle zero or negative volume
         if 'volume' in df.columns:
             df.loc[df['volume'] <= 0, 'volume'] = np.nan
-            df['volume'] = df['volume'].fillna(method='ffill', limit=1)
+            df['volume'] = df['volume'].ffill(limit=1)
         
         return df
     

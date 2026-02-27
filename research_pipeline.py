@@ -297,11 +297,11 @@ class ResearchPipeline:
                 # Load OHLCV data
                 df = self.data_loader.load_csv(path)
                 
-                # Preprocess
-                df = self.preprocessor.clean_ohlcv(df)
-                
                 # Extract symbol from filename or path
                 symbol = Path(path).stem.split('_')[0].upper()
+                
+                # Preprocess
+                df, quality_report = self.preprocessor.preprocess(df, symbol=symbol)
                 
                 if symbols is None or symbol in symbols:
                     data[symbol] = df
@@ -326,9 +326,19 @@ class ResearchPipeline:
         # Create strategy
         strategy = self._create_strategy(strategy_name)
         
-        # Generate features
-        features = self.feature_engine.generate_features(ohlcv)
-        data_with_features = pd.concat([ohlcv, features], axis=1)
+        # Generate features (don't drop NaN rows - let backtest handle missing data)
+        # Note: generate_features already includes original OHLCV columns, so no concat needed
+        data_with_features = self.feature_engine.generate_features(ohlcv, drop_na=False)
+        
+        # Forward fill remaining NaN values and drop initial rows with NaN
+        data_with_features = data_with_features.ffill().bfill()
+        # Drop rows that still have critical NaN (first few rows might have)
+        data_with_features = data_with_features.dropna(subset=['open', 'high', 'low', 'close', 'volume'])
+        
+        logger.info(f"Data after feature generation: {len(data_with_features)} rows")
+        
+        if len(data_with_features) < 100:
+            raise ValueError(f"Insufficient data after feature generation: {len(data_with_features)} rows")
         
         # Get human baseline parameters
         human_params = strategy.parameters.to_dict()
@@ -430,15 +440,27 @@ class ResearchPipeline:
         # Update strategy parameters
         strategy.update_parameters(params)
         
-        # Create backtest engine
-        backtest = BacktestEngine(
-            initial_capital=self.backtest_config.initial_capital,
-            commission_pct=self.backtest_config.commission_pct,
+        # Create backtest config
+        from backtesting.backtest_engine import BacktestConfig as BtConfig
+        bt_config = BtConfig(
+            initial_capital=self.strategy_config.initial_capital,
+            commission_pct=self.strategy_config.trading_fee_pct,
             slippage_pct=self.backtest_config.slippage_pct
         )
         
+        # Create backtest engine
+        backtest = BacktestEngine(config=bt_config)
+        
         # Run backtest
-        results = backtest.run(strategy, data)
+        result = backtest.run(strategy, data)
+        
+        # Convert BacktestResult to dict for compatibility
+        results = {
+            'metrics': result.metrics.to_dict() if result.metrics else {},
+            'trades': [t.to_dict() for t in result.trades] if result.trades else [],
+            'equity_curve': result.equity_curve,
+            'total_trades': len(result.trades) if result.trades else 0
+        }
         
         # Log audit
         self.audit_logger.log_event(
@@ -447,8 +469,8 @@ class ResearchPipeline:
                 'strategy': strategy.__class__.__name__,
                 'params': params,
                 'param_source': param_source,
-                'sharpe_ratio': results.get('metrics', {}).get('sharpe_ratio', 0),
-                'total_return': results.get('metrics', {}).get('total_return', 0)
+                'sharpe_ratio': results['metrics'].get('sharpe_ratio', 0),
+                'total_return': results['metrics'].get('total_return', 0)
             },
             strategy_name=strategy.__class__.__name__
         )
@@ -465,57 +487,96 @@ class ResearchPipeline:
         # Get parameter bounds from strategy
         param_bounds = strategy.get_parameter_bounds()
         
+        # Create objective function for MLParameterAdjuster
+        def objective_func(strategy_name: str, params: Dict[str, Any], train_data: pd.DataFrame) -> float:
+            """Evaluate parameters using backtesting."""
+            # Update strategy params
+            strategy.update_parameters(params)
+            
+            # Create backtest config
+            from backtesting.backtest_engine import BacktestConfig as BtConfig
+            bt_config = BtConfig(
+                initial_capital=self.strategy_config.initial_capital,
+                commission_pct=self.strategy_config.trading_fee_pct,
+                slippage_pct=self.backtest_config.slippage_pct
+            )
+            
+            # Run backtest
+            backtest = BacktestEngine(config=bt_config)
+            result = backtest.run(strategy, train_data)
+            
+            # Return sharpe ratio as objective
+            return result.metrics.sharpe_ratio if result.metrics else 0.0
+        
+        # Get strategy bounds
+        strategy_bounds = {
+            strategy.__class__.__name__: param_bounds
+        }
+        
         # Create ML parameter adjuster
         adjuster = MLParameterAdjuster(
-            strategy=strategy,
-            param_bounds=param_bounds,
-            n_trials=self.optimization_config.bayesian_n_calls
+            objective_function=objective_func,
+            strategy_bounds=strategy_bounds,
+            verbose=True
         )
         
-        # Run comparison
-        results = adjuster.compare_optimizers(data, human_params)
-        
-        # Find best optimizer
-        best_optimizer = 'bayesian'
-        best_improvement = -float('inf')
-        best_params = human_params.copy()
-        
-        for method, result in results.items():
-            if result.get('improvement_pct', 0) > best_improvement:
-                best_improvement = result['improvement_pct']
-                best_optimizer = method
-                best_params = result.get('ml_params', human_params)
+        # Run optimization using Bayesian method
+        from optimization.ml_parameter_adjuster import OptimizationMethod
+        result = adjuster.optimize_strategy(
+            strategy_name=strategy.__class__.__name__,
+            train_data=data,
+            method=OptimizationMethod.BAYESIAN,
+            human_params=human_params,
+            n_iterations=self.optimization_config.bayesian_n_calls
+        )
         
         # Log optimization audit
         self.audit_logger.log_optimization(OptimizationAudit(
             timestamp=datetime.now(),
             strategy_name=strategy.__class__.__name__,
-            optimizer_type=best_optimizer,
-            n_trials=self.optimization_config.bayesian_n_calls,
-            best_objective=best_improvement,
-            elapsed_time=sum(r.get('time_seconds', 0) for r in results.values()),
+            optimizer_type=result.optimization_method,
+            n_trials=result.n_iterations,
+            best_objective=result.ml_objective,
+            elapsed_time=result.optimization_time_seconds,
             human_params=human_params,
-            ml_params=best_params,
-            improvement=best_improvement / 100 if best_improvement else 0
+            ml_params=result.ml_params,
+            improvement=result.improvement_pct / 100 if result.improvement_pct else 0
         ))
         
-        return best_params, best_optimizer
+        return result.ml_params or human_params, result.optimization_method or "bayesian"
     
     def _analyze_conditions(
         self,
         data: pd.DataFrame,
         human_results: Dict[str, Any],
         ml_results: Dict[str, Any]
-    ) -> ConditionAnalyzer:
+    ) -> Optional[ConditionAnalyzer]:
         """Analyze market conditions and performance."""
-        analyzer = ConditionAnalyzer()
-        
-        # Analyze where ML helped vs hurt
-        analyzer.analyze_performance_by_condition(
-            data, human_results, ml_results
-        )
-        
-        return analyzer
+        try:
+            analyzer = ConditionAnalyzer()
+            
+            # First identify conditions in the data
+            conditions = analyzer.identify_conditions(data)
+            
+            # Build condition results for analysis
+            if conditions:
+                # Create condition result for whole period
+                condition_results = [(
+                    conditions[0] if conditions else None,
+                    {
+                        'human_metrics': human_results.get('metrics', {}),
+                        'ml_metrics': ml_results.get('metrics', {}),
+                        'ml_params': {}  # Will be filled by optimization
+                    }
+                )]
+                
+                # Analyze ML effectiveness 
+                analyzer.analyze_ml_effectiveness(condition_results)
+            
+            return analyzer
+        except Exception as e:
+            logger.warning(f"Condition analysis failed: {e}")
+            return None
     
     def _detect_failures(
         self,
@@ -525,14 +586,19 @@ class ResearchPipeline:
         ml_params: Dict[str, Any]
     ) -> FailureDetector:
         """Detect optimization failures."""
-        detector = FailureDetector(
-            human_results=human_results,
-            ml_results=ml_results,
-            human_params=human_params,
+        detector = FailureDetector()
+        
+        # Extract metrics from results
+        human_metrics = human_results.get('metrics', {})
+        ml_metrics = ml_results.get('metrics', {})
+        
+        # Call detect_failures with the proper arguments
+        detector.detect_failures(
+            train_metrics=ml_metrics,  # ML optimized as train
+            test_metrics=ml_metrics,   # Same for now (could use walk-forward)
+            baseline_metrics=human_metrics,
             ml_params=ml_params
         )
-        
-        detector.detect_failures()
         
         return detector
     

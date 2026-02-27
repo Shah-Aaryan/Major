@@ -55,6 +55,7 @@ class FeatureConfig:
     # Regime features
     regime_lookback: int = 100
     trend_threshold: float = 25.0
+    adx_trend_threshold: float = 25.0  # Alias for trend_threshold
 
 
 class FeatureEngine:

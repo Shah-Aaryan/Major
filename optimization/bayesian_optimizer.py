@@ -183,7 +183,7 @@ class BayesianOptimizer(BaseOptimizer):
         # Store best trial info
         self.optuna_study = study
     
-    def _suggest_optuna(self, trial: optuna.Trial) -> Dict[str, Any]:
+    def _suggest_optuna(self, trial: "optuna.Trial") -> Dict[str, Any]:
         """Suggest parameters using Optuna trial."""
         params = {}
         

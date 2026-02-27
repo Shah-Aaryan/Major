@@ -210,7 +210,7 @@ class OptimizationAudit:
         for param, change in self.parameter_changes.items():
             old = change.get('human', 'N/A')
             new = change.get('ml', 'N/A')
-            explanation.append(f"  {param}: {old} → {new}")
+            explanation.append(f"  {param}: {old} -> {new}")
         
         explanation.append("")
         
