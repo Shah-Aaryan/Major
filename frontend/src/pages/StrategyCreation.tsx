@@ -55,7 +55,7 @@ const StrategyCreation = () => {
             <div className="p-2 rounded-lg bg-primary/20">
               <Activity className="w-6 h-6 text-primary" />
             </div>
-            <span className="text-xl font-bold gradient-text">CryptoXplain</span>
+            <span className="text-xl font-bold gradient-text">BeyondAlgo</span>
           </div>
         </div>
       </header>

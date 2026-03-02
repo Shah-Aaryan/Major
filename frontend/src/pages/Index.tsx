@@ -47,7 +47,7 @@ const Index = () => {
             <div className="p-2 rounded-xl bg-primary/20 glow-primary">
               <Activity className="w-7 h-7 text-primary" />
             </div>
-            <span className="text-2xl font-bold gradient-text">CryptoXplain</span>
+            <span className="text-2xl font-bold gradient-text">BeyondAlgo</span>
           </div>
           <div className="flex items-center gap-3">
             <Button variant="ghost" onClick={() => navigate('/login')}>
@@ -130,7 +130,7 @@ const Index = () => {
       {/* Footer */}
       <footer className="relative z-10 border-t border-border/50 py-8">
         <div className="container mx-auto px-4 text-center text-sm text-muted-foreground">
-          <p>CryptoXplain — Academic MVP for Explainable Algorithmic Trading</p>
+          <p>BeyondAlgo — Academic MVP for Explainable Algorithmic Trading</p>
           <p className="mt-2">Paper trading only. No real funds involved.</p>
         </div>
       </footer>

@@ -64,7 +64,7 @@ const Register = () => {
             <div className="p-3 rounded-xl bg-primary/20 glow-primary">
               <Activity className="w-8 h-8 text-primary" />
             </div>
-            <h1 className="text-3xl font-bold gradient-text">CryptoXplain</h1>
+            <h1 className="text-3xl font-bold gradient-text">BeyondAlgo</h1>
           </div>
           <p className="text-muted-foreground">
             Start your algorithmic trading journey
