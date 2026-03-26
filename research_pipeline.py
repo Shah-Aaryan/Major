@@ -42,11 +42,8 @@ from strategies.rsi_mean_reversion import RSIMeanReversionStrategy
 from strategies.ema_crossover import EMACrossoverStrategy
 from strategies.bollinger_breakout import BollingerBreakoutStrategy
 
-# Optimization modules
 from optimization.ml_parameter_adjuster import MLParameterAdjuster
-from optimization.bayesian_optimizer import BayesianOptimizer
-from optimization.random_search import RandomSearchOptimizer
-from optimization.evolutionary_optimizer import EvolutionaryOptimizer
+from optimization.optimizer_registry import get_optimizer_registry
 
 # Backtesting modules
 from backtesting.backtest_engine import BacktestEngine
@@ -185,6 +182,16 @@ class ResearchPipeline:
         self.preprocessor = DataPreprocessor()
         self.resampler = DataResampler()
         self.feature_engine = FeatureEngine(self.feature_config)
+
+        # Optimizer registry (aligns with MLParameterAdjuster)
+        self._optimizer_specs = get_optimizer_registry()
+        self._optimizer_specs_by_key = {
+            spec.key: spec for spec in self._optimizer_specs
+        }
+        self._implemented_optimizer_keys = [
+            spec.key for spec in self._optimizer_specs if spec.status == "implemented"
+        ]
+        self._override_optimizer_method: Optional[str] = None
         
         # Audit logger
         self.audit_logger = AuditLogger(
@@ -205,7 +212,8 @@ class ResearchPipeline:
         strategies: Optional[List[str]] = None,
         walk_forward: bool = False,
         wf_windows: int = 5,
-        wf_train_ratio: float = 0.8
+        wf_train_ratio: float = 0.8,
+        optimizer_method: Optional[str] = None
     ) -> ResearchSession:
         """
         Run complete research pipeline.
@@ -231,14 +239,24 @@ class ResearchPipeline:
             output_dir=str(self.output_dir)
         )
         
+        # Record any optimizer override for this run
+        self._override_optimizer_method = optimizer_method
+
         self.audit_logger.log_event(
             AuditEventType.SESSION_START,
             {
                 'data_paths': data_paths,
                 'timeframes': timeframes,
-                'strategies': strategies or ['all']
+                'strategies': strategies or ['all'],
+                'optimizer_method': optimizer_method or self.optimization_config.preferred_method,
+                'available_optimizers': self.list_available_optimizers()
             },
             explanation="Starting full research pipeline"
+        )
+
+        logger.info(
+            "Available optimizers (implemented): %s",
+            ", ".join(self.list_available_optimizers())
         )
         
         # Default strategies
@@ -371,7 +389,7 @@ class ResearchPipeline:
         logger.info("Running ML optimization...")
         opt_start = time.time()
         ml_params, best_optimizer, adjustment_result = self._run_optimization(
-            strategy, data_with_features, human_params
+            strategy, data_with_features, human_params, self._override_optimizer_method
         )
         opt_time = time.time() - opt_start
         
@@ -473,6 +491,10 @@ class ResearchPipeline:
         # Get human baseline parameters
         human_params = strategy.parameters.to_dict()
         
+        method_key = self._resolve_optimizer_method()
+        wf_iterations = self._get_iterations_for_method(method_key, n_windows=n_windows)
+        optimizer_kwargs = self._optimizer_kwargs_for_method(method_key)
+
         # Create optimize function for walk-forward validator
         def optimize_func(train_data: pd.DataFrame) -> Dict[str, Any]:
             """Optimize parameters on training window."""
@@ -495,14 +517,14 @@ class ResearchPipeline:
                 strategy_bounds={strategy.__class__.__name__: param_bounds},
                 verbose=False  # Less verbose for walk-forward
             )
-            
-            from optimization.ml_parameter_adjuster import OptimizationMethod
+
             result = adjuster.optimize_strategy(
                 strategy_name=strategy.__class__.__name__,
                 train_data=train_data,
-                method=OptimizationMethod.BAYESIAN,
+                method=method_key,
                 human_params=human_params,
-                n_iterations=max(10, self.optimization_config.bayesian_n_calls // n_windows)  # Fewer trials per window
+                n_iterations=wf_iterations,  # Fewer trials per window
+                **optimizer_kwargs
             )
             
             return result.ml_params or human_params
@@ -591,7 +613,7 @@ class ResearchPipeline:
             improvement=improvements,
             human_params=human_params,
             ml_params=final_params,
-            best_optimizer='walk_forward_bayesian',
+            best_optimizer=method_key,
             failures_detected=0,
             ml_recommended=wf_result.ml_consistency > 0.5,  # ML helps in >50% of windows
             confidence=wf_result.ml_consistency,
@@ -612,6 +634,127 @@ class ResearchPipeline:
             raise ValueError(f"Unknown strategy: {strategy_name}")
         
         return strategies[strategy_name]()
+
+    def list_available_optimizers(self) -> List[str]:
+        """Return human-readable list of implemented optimizer keys/names."""
+        return [f"{spec.key} ({spec.name})" for spec in self._optimizer_specs if spec.status == "implemented"]
+
+    def _resolve_optimizer_method(self, method: Optional[str] = None) -> str:
+        """Resolve optimizer key from override/config to a registry key."""
+        # Legacy aliases for backward compatibility
+        legacy_map = {
+            'bayesian': 'bayesian_gp',
+            'bayesian_gp': 'bayesian_gp',
+            'bayesian_tpe': 'bayesian_tpe',
+            'tpe': 'bayesian_tpe',
+            'random_search': 'random_search',
+            'lhs': 'latin_hypercube',
+            'latin_hypercube': 'latin_hypercube',
+            'sobol': 'sobol',
+            'grid': 'grid_search',
+            'grid_search': 'grid_search',
+            'evolutionary': 'genetic_algorithm',
+            'genetic_algorithm': 'genetic_algorithm',
+            'ga': 'genetic_algorithm',
+            'cma_es': 'cma_es',
+            'de': 'differential_evolution',
+            'differential_evolution': 'differential_evolution',
+            'pso': 'particle_swarm',
+            'particle_swarm': 'particle_swarm',
+            'sa': 'simulated_annealing',
+            'simulated_annealing': 'simulated_annealing',
+            'es': 'evolution_strategies',
+            'evolution_strategies': 'evolution_strategies',
+            'nsga_ii': 'nsga_ii',
+            'nsga_iii': 'nsga_iii',
+            'hyperband': 'hyperband_asha',
+            'asha': 'hyperband_asha'
+        }
+
+        # Order of precedence: explicit arg > pipeline override > config.preferred_method > config.methods
+        candidates = [method, self._override_optimizer_method, self.optimization_config.preferred_method]
+
+        for cand in candidates:
+            if cand:
+                candidate = legacy_map.get(cand.lower(), cand.lower())
+                if candidate in self._optimizer_specs_by_key and candidate in self._implemented_optimizer_keys:
+                    return candidate
+                else:
+                    logger.warning(
+                        f"Requested optimizer '{cand}' not available; implemented: {self._implemented_optimizer_keys}"
+                    )
+
+        # Fallback to first implemented from config.methods
+        for preferred in self.optimization_config.methods:
+            candidate = legacy_map.get(preferred.lower(), preferred.lower())
+            if candidate in self._implemented_optimizer_keys:
+                return candidate
+
+        # Final fallback to any implemented optimizer
+        if self._implemented_optimizer_keys:
+            logger.warning("No valid optimizer found in config; defaulting to first implemented option")
+            return self._implemented_optimizer_keys[0]
+
+        raise ValueError("No implemented optimizers available in registry.")
+
+    def _get_iterations_for_method(self, method_key: str, n_windows: Optional[int] = None) -> int:
+        """Pick iteration count based on method and optionally walk-forward windows."""
+        base = self.optimization_config.bayesian_n_calls
+
+        if method_key in {'random_search', 'latin_hypercube', 'sobol', 'grid_search'}:
+            base = self.optimization_config.random_search_n_iter
+        elif method_key in {'genetic_algorithm', 'evolution_strategies'}:
+            base = self.optimization_config.es_generations
+        elif method_key == 'nsga_ii':
+            base = self.optimization_config.es_generations
+        elif method_key == 'differential_evolution':
+            base = self.optimization_config.es_generations
+        elif method_key == 'simulated_annealing':
+            base = self.optimization_config.sa_maxiter
+
+        if n_windows and n_windows > 1:
+            return max(10, base // n_windows)
+        return base
+
+    def _optimizer_kwargs_for_method(self, method_key: str) -> Dict[str, Any]:
+        """Map optimizer-specific kwargs from configuration."""
+        if method_key == 'grid_search':
+            return {'grid_resolution': self.optimization_config.grid_resolution}
+
+        if method_key == 'random_search':
+            return {'sampling_strategy': self.optimization_config.random_search_strategy}
+
+        if method_key == 'latin_hypercube':
+            return {'sampling_strategy': 'latin_hypercube'}
+
+        if method_key == 'sobol':
+            return {'sampling_strategy': 'sobol'}
+
+        if method_key == 'particle_swarm':
+            return {
+                'swarm_size': self.optimization_config.es_population_size,
+            }
+
+        if method_key == 'differential_evolution':
+            return {
+                'population_size': self.optimization_config.de_population_size,
+                'mutation': self.optimization_config.de_mutation,
+                'recombination': self.optimization_config.de_recombination,
+            }
+
+        if method_key == 'simulated_annealing':
+            return {
+                'maxiter': self.optimization_config.sa_maxiter,
+                'initial_temp': self.optimization_config.sa_initial_temp,
+                'restart_temp_ratio': self.optimization_config.sa_restart_temp_ratio,
+            }
+
+        if method_key == 'hyperband_asha':
+            return {
+                'reduction_factor': 3,
+            }
+
+        return {}
     
     def _run_backtest(
         self,
@@ -665,8 +808,9 @@ class ResearchPipeline:
         self,
         strategy,
         data: pd.DataFrame,
-        human_params: Dict[str, Any]
-    ) -> Tuple[Dict[str, Any], str]:
+        human_params: Dict[str, Any],
+        optimizer_method: Optional[str] = None
+    ) -> Tuple[Dict[str, Any], str, Any]:
         """Run ML optimization and return best parameters."""
         # Get parameter bounds from strategy
         param_bounds = strategy.get_parameter_bounds()
@@ -704,14 +848,19 @@ class ResearchPipeline:
             verbose=True
         )
         
-        # Run optimization using Bayesian method
-        from optimization.ml_parameter_adjuster import OptimizationMethod
+        # Resolve optimizer method from override/config
+        method_key = self._resolve_optimizer_method(optimizer_method)
+        n_iterations = self._get_iterations_for_method(method_key)
+
+        optimizer_kwargs = self._optimizer_kwargs_for_method(method_key)
+
         result = adjuster.optimize_strategy(
             strategy_name=strategy.__class__.__name__,
             train_data=data,
-            method=OptimizationMethod.BAYESIAN,
+            method=method_key,
             human_params=human_params,
-            n_iterations=self.optimization_config.bayesian_n_calls
+            n_iterations=n_iterations,
+            **optimizer_kwargs
         )
         
         # Log optimization audit
@@ -949,7 +1098,8 @@ def run_quick_experiment(
     data_path: str,
     strategy_name: str = 'rsi_mean_reversion',
     timeframe: str = '5m',
-    n_trials: int = 50
+    n_trials: int = 50,
+    optimizer_method: Optional[str] = None
 ) -> ResearchResult:
     """
     Quick helper to run a single experiment.
@@ -965,7 +1115,8 @@ def run_quick_experiment(
     """
     opt_config = OptimizationConfig(
         bayesian_n_calls=n_trials,
-        random_search_n_iter=n_trials
+        random_search_n_iter=n_trials,
+        preferred_method=optimizer_method
     )
     
     pipeline = ResearchPipeline(
@@ -973,10 +1124,16 @@ def run_quick_experiment(
         output_dir="./quick_experiment"
     )
     
+    logger.info(
+        "Available optimizers: %s",
+        ", ".join(pipeline.list_available_optimizers())
+    )
+
     session = pipeline.run_full_research(
         data_paths=[data_path],
         timeframes=[timeframe],
-        strategies=[strategy_name]
+        strategies=[strategy_name],
+        optimizer_method=optimizer_method
     )
     
     return session.results[0] if session.results else None

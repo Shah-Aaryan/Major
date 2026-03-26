@@ -30,8 +30,20 @@ from optimization.base_optimizer import (
     ParameterType
 )
 from optimization.bayesian_optimizer import BayesianOptimizer
-from optimization.random_search import RandomSearchOptimizer
-from optimization.evolutionary_optimizer import EvolutionaryOptimizer
+from optimization.random_search import RandomSearchOptimizer, GridSearchOptimizer
+from optimization.evolutionary_optimizer import EvolutionaryOptimizer, DifferentialEvolutionOptimizer
+from optimization.multi_objective_optimizer import MultiObjectiveOptimizer
+from optimization.simulated_annealing import SimulatedAnnealingOptimizer
+from optimization.additional_optimizers import (
+    CMAESOptimizer,
+    ParticleSwarmOptimizer,
+    EvolutionStrategiesOptimizer,
+    HyperbandASHAOptimizer,
+)
+from optimization.optimizer_registry import (
+    OptimizerSpec,
+    get_optimizer_registry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -391,6 +403,15 @@ class MLParameterAdjuster:
         self.objective_function = objective_function
         self.strategy_bounds = strategy_bounds
         self.verbose = verbose
+
+        # Registry of available optimizers (15 declared, some planned)
+        self.optimizer_specs: List[OptimizerSpec] = get_optimizer_registry()
+        self.optimizer_specs_by_key: Dict[str, OptimizerSpec] = {
+            spec.key: spec for spec in self.optimizer_specs
+        }
+        self.implemented_optimizer_keys: List[str] = [
+            spec.key for spec in self.optimizer_specs if spec.status == "implemented"
+        ]
         
         # Default integer params
         self.integer_params = integer_params or [
@@ -404,14 +425,47 @@ class MLParameterAdjuster:
         
         # Method comparison data
         self.method_comparison: Dict[str, List[OptimizationResult]] = {
-            method.value: [] for method in OptimizationMethod
+            key: [] for key in self.implemented_optimizer_keys
         }
+
+    def _resolve_method(self, method: Union[OptimizationMethod, str]) -> Tuple[str, OptimizerSpec]:
+        """Resolve method input (enum or string) to registry key and spec."""
+        # Legacy enum mapping
+        legacy_map = {
+            OptimizationMethod.BAYESIAN.value: "bayesian_gp",
+            OptimizationMethod.RANDOM_SEARCH.value: "random_search",
+            OptimizationMethod.EVOLUTIONARY.value: "genetic_algorithm",
+            OptimizationMethod.GRID_SEARCH.value: "grid_search",
+        }
+
+        if isinstance(method, OptimizationMethod):
+            method = method.value
+
+        method_str = str(method).lower()
+        method_key = legacy_map.get(method_str, method_str)
+
+        if method_key not in self.optimizer_specs_by_key:
+            raise ValueError(
+                f"Unknown optimization method '{method}'. "
+                f"Available: {list(self.optimizer_specs_by_key.keys())}"
+            )
+
+        spec = self.optimizer_specs_by_key[method_key]
+        if spec.status != "implemented":
+            raise ValueError(
+                f"Optimization method '{spec.name}' ({method_key}) is planned but not implemented yet."
+            )
+        if spec.cls is None:
+            raise ValueError(
+                f"No optimizer class wired for '{spec.name}' ({method_key})."
+            )
+        return method_key, spec
     
     def optimize_strategy(
         self,
         strategy_name: str,
         train_data: pd.DataFrame,
-        method: OptimizationMethod = OptimizationMethod.BAYESIAN,
+        method: Union[OptimizationMethod, str] = OptimizationMethod.BAYESIAN,
         human_params: Optional[Dict[str, Any]] = None,
         n_iterations: int = 100,
         random_state: Optional[int] = None,
@@ -434,9 +488,11 @@ class MLParameterAdjuster:
         Returns:
             ParameterAdjustmentResult with comparison data
         """
+        method_key, method_spec = self._resolve_method(method)
+
         logger.info(
             f"Starting parameter optimization for {strategy_name} "
-            f"using {method.value}"
+            f"using {method_spec.name} ({method_key})"
         )
         
         # Get parameter bounds for this strategy
@@ -461,7 +517,8 @@ class MLParameterAdjuster:
         
         # Create optimizer
         optimizer = self._create_optimizer(
-            method=method,
+            method_key=method_key,
+            method_spec=method_spec,
             parameter_space=space,
             objective_function=objective_wrapper,
             n_iterations=n_iterations,
@@ -473,7 +530,10 @@ class MLParameterAdjuster:
         opt_result = optimizer.optimize(baseline_objective=human_objective)
         
         # Store method comparison data
-        self.method_comparison[method.value].append(opt_result)
+        if method_key in self.method_comparison:
+            self.method_comparison[method_key].append(opt_result)
+        else:
+            self.method_comparison[method_key] = [opt_result]
         
         # Create adjustment result
         result = ParameterAdjustmentResult(
@@ -482,7 +542,7 @@ class MLParameterAdjuster:
             human_objective=human_objective,
             ml_params=opt_result.best_parameters,
             ml_objective=opt_result.best_objective,
-            optimization_method=method.value,
+            optimization_method=method_key,
             optimization_time_seconds=opt_result.total_time_seconds,
             n_iterations=opt_result.n_iterations,
             market_condition=market_condition
@@ -500,7 +560,7 @@ class MLParameterAdjuster:
         self,
         strategy_name: str,
         train_data: pd.DataFrame,
-        methods: Optional[List[OptimizationMethod]] = None,
+        methods: Optional[List[Union[OptimizationMethod, str]]] = None,
         n_iterations: int = 50,
         n_repeats: int = 3,
         random_state: Optional[int] = None
@@ -522,15 +582,12 @@ class MLParameterAdjuster:
             Dictionary with comparison statistics
         """
         if methods is None:
-            methods = [
-                OptimizationMethod.BAYESIAN,
-                OptimizationMethod.RANDOM_SEARCH,
-                OptimizationMethod.EVOLUTIONARY
-            ]
+            methods = list(self.implemented_optimizer_keys)
         
         comparison = {}
         
         for method in methods:
+            method_key, method_spec = self._resolve_method(method)
             method_results = []
             
             for repeat in range(n_repeats):
@@ -539,7 +596,7 @@ class MLParameterAdjuster:
                 result = self.optimize_strategy(
                     strategy_name=strategy_name,
                     train_data=train_data,
-                    method=method,
+                    method=method_key,
                     n_iterations=n_iterations,
                     random_state=seed,
                     market_condition=f"comparison_repeat_{repeat}"
@@ -552,7 +609,7 @@ class MLParameterAdjuster:
             improvements = [r.improvement_pct for r in method_results]
             times = [r.optimization_time_seconds for r in method_results]
             
-            comparison[method.value] = {
+            comparison[method_key] = {
                 'mean_objective': np.mean(objectives),
                 'std_objective': np.std(objectives),
                 'mean_improvement_pct': np.mean(improvements),
@@ -576,14 +633,15 @@ class MLParameterAdjuster:
     
     def _create_optimizer(
         self,
-        method: OptimizationMethod,
+        method_key: str,
+        method_spec: OptimizerSpec,
         parameter_space: ParameterSpace,
         objective_function: Callable,
         n_iterations: int,
         random_state: Optional[int],
         **kwargs
     ) -> BaseOptimizer:
-        """Create optimizer based on method."""
+        """Create optimizer instance based on registry spec."""
         common_args = {
             'parameter_space': parameter_space,
             'objective_function': objective_function,
@@ -592,15 +650,48 @@ class MLParameterAdjuster:
             'random_state': random_state,
             'verbose': self.verbose
         }
-        
-        if method == OptimizationMethod.BAYESIAN:
-            return BayesianOptimizer(**common_args, **kwargs)
-        elif method == OptimizationMethod.RANDOM_SEARCH:
+
+        # Map registry keys to concrete classes/backends
+        if method_key in {"bayesian_gp", "bayesian_tpe"}:
+            backend = 'optuna' if method_key == "bayesian_tpe" else kwargs.pop('backend', 'skopt')
+            return BayesianOptimizer(**common_args, backend=backend, **kwargs)
+
+        if method_key in {"random_search", "latin_hypercube", "sobol"}:
             return RandomSearchOptimizer(**common_args, **kwargs)
-        elif method == OptimizationMethod.EVOLUTIONARY:
+
+        if method_key == "grid_search":
+            grid_args = dict(common_args)
+            grid_args.pop('n_iterations', None)
+            return GridSearchOptimizer(**grid_args, **kwargs)
+
+        if method_key in {"genetic_algorithm"}:
             return EvolutionaryOptimizer(**common_args, **kwargs)
-        else:
-            raise ValueError(f"Unknown optimization method: {method}")
+
+        if method_key == "differential_evolution":
+            return DifferentialEvolutionOptimizer(**common_args, **kwargs)
+
+        if method_key == "simulated_annealing":
+            return SimulatedAnnealingOptimizer(**common_args, **kwargs)
+
+        if method_key == "particle_swarm":
+            return ParticleSwarmOptimizer(**common_args, **kwargs)
+
+        if method_key == "evolution_strategies":
+            return EvolutionStrategiesOptimizer(**common_args, **kwargs)
+
+        if method_key == "cma_es":
+            return CMAESOptimizer(**common_args, **kwargs)
+
+        if method_key == "hyperband_asha":
+            return HyperbandASHAOptimizer(**common_args, **kwargs)
+
+        if method_key in {"nsga_ii", "nsga_iii"}:
+            return MultiObjectiveOptimizer(**common_args, **kwargs)
+
+        # Planned but not yet implemented (guard should prevent reaching here)
+        raise ValueError(
+            f"Optimizer '{method_spec.name}' ({method_key}) is not wired yet."
+        )
     
     def analyze_ml_effectiveness(
         self,

@@ -40,6 +40,10 @@ from features.regime_features import (
     detect_volatility_regime,
     RegimeFeatureGenerator
 )
+from features.indicator_registry import (
+    IndicatorSpec,
+    get_indicator_registry,
+)
 from features.feature_engine import FeatureEngine
 
 __all__ = [
@@ -74,6 +78,8 @@ __all__ = [
     'classify_market_regime',
     'detect_volatility_regime',
     'RegimeFeatureGenerator',
+    'IndicatorSpec',
+    'get_indicator_registry',
     # Main engine
     'FeatureEngine'
 ]

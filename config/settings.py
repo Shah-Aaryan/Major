@@ -217,6 +217,9 @@ class OptimizationConfig:
     methods: List[str] = field(default_factory=lambda: [
         "bayesian", "random_search", "evolutionary"
     ])
+
+    # Preferred optimizer (overrides methods order when set)
+    preferred_method: Optional[str] = None
     
     # Bayesian optimization settings
     bayesian_n_calls: int = 100
@@ -225,12 +228,24 @@ class OptimizationConfig:
     
     # Random search settings
     random_search_n_iter: int = 100
+    random_search_strategy: str = "uniform"  # uniform | latin_hypercube | sobol
+    grid_resolution: int = 5
     
     # Evolutionary strategy settings
     es_population_size: int = 50
     es_generations: int = 30
     es_mutation_rate: float = 0.2
     es_crossover_rate: float = 0.7
+
+    # Differential evolution settings
+    de_population_size: int = 15
+    de_mutation: Tuple[float, float] = (0.5, 1.0)
+    de_recombination: float = 0.7
+
+    # Simulated annealing settings
+    sa_maxiter: int = 200
+    sa_initial_temp: float = 5230.0
+    sa_restart_temp_ratio: float = 5e-4
     
     # Optimization objectives (weights)
     objective_weights: Dict[str, float] = field(default_factory=lambda: {

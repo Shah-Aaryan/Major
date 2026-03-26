@@ -20,6 +20,7 @@ from features.momentum_indicators import MomentumIndicatorGenerator
 from features.volatility_indicators import VolatilityIndicatorGenerator
 from features.volume_indicators import VolumeIndicatorGenerator
 from features.regime_features import RegimeFeatureGenerator
+from features.indicator_registry import get_indicator_registry, IndicatorSpec
 
 logger = logging.getLogger(__name__)
 
@@ -112,15 +113,54 @@ class FeatureEngine:
             regime_lookback=self.config.regime_lookback,
             trend_threshold=self.config.adx_trend_threshold
         )
+
+        # Registry of the full 50-indicator surface (implemented + planned)
+        self.indicator_registry: List[IndicatorSpec] = get_indicator_registry()
+
+        # Map indicator names (lowercase) to the column prefixes they emit.
+        # This is used to filter feature sets when users request specific indicators.
+        self._indicator_column_map = {
+            "simple moving average (sma)": ["sma_", "price_sma_"],
+            "exponential moving average (ema)": ["ema_", "price_ema_", "ema_20_for_slope", "ema_20_slope"],
+            "moving average convergence divergence (macd)": ["macd"],
+            "average directional index (adx)": ["adx", "plus_di", "minus_di", "dx", "trend_strength", "trend_direction", "di_crossover"],
+            "relative strength index (rsi)": ["rsi_"],
+            "stochastic rsi": ["stoch_rsi"],
+            "williams %r": ["williams_r"],
+            "commodity channel index (cci)": ["cci"],
+            "rate of change (roc)": ["roc_"],
+            "average true range (atr)": ["true_range", "atr_"],
+            "bollinger bands": ["bb_"],
+            "keltner channels": ["kc_"],
+            "donchian channels": ["dc_"],
+            "rolling standard deviation": ["volatility_"],
+            "historical volatility (close-to-close)": ["volatility_"],
+            "parkinson volatility": ["vol_parkinson"],
+            "garman-klass volatility": ["vol_garman_klass"],
+            "yang-zhang volatility": ["vol_yang_zhang"],
+            "on-balance volume (obv)": ["obv"],
+            "volume weighted average price (vwap)": ["vwap"],
+            "money flow index (mfi)": ["mfi"],
+            "accumulation/distribution line (adl)": ["ad_line", "mfm"],
+            "trend lines (linear regression)": ["trend_"] ,
+            "ema slope": ["ema_20_slope"],
+        }
         
         # Feature cache
         self._cache: Dict[str, pd.DataFrame] = {}
         self._cache_dir = Path("./cache/features")
+
+    def list_indicators(self, implemented_only: bool = True) -> List[IndicatorSpec]:
+        """Return indicator specifications, optionally filtering to implemented ones."""
+        if implemented_only:
+            return [spec for spec in self.indicator_registry if spec.implemented]
+        return list(self.indicator_registry)
     
     def generate_features(
         self,
         df: pd.DataFrame,
         feature_groups: Optional[List[str]] = None,
+        include_indicators: Optional[List[str]] = None,
         drop_na: bool = True,
         use_cache: bool = False,
         cache_key: Optional[str] = None
@@ -132,6 +172,8 @@ class FeatureEngine:
             df: OHLCV DataFrame (must have open, high, low, close, volume)
             feature_groups: List of feature groups to generate (None = all)
                 Options: 'price', 'trend', 'momentum', 'volatility', 'volume', 'regime'
+            include_indicators: Optional list of indicator names (registry names) to include.
+                If provided, only indicators in this list are emitted (plus OHLCV).
             drop_na: Whether to drop rows with NaN values
             use_cache: Whether to use cached features
             cache_key: Key for caching (auto-generated if None)
@@ -151,11 +193,28 @@ class FeatureEngine:
         if missing:
             raise ValueError(f"Missing required columns: {missing}")
         
+        # Normalize indicator selection and derive groups to generate
+        selected_specs: Optional[List[IndicatorSpec]] = None
+        if include_indicators:
+            requested = {name.strip().lower() for name in include_indicators}
+            name_to_spec = {spec.name.lower(): spec for spec in self.list_indicators(implemented_only=True)}
+            unknown = sorted(requested - set(name_to_spec.keys()))
+            if unknown:
+                raise ValueError(f"Unknown or unimplemented indicators: {unknown}")
+            selected_specs = [name_to_spec[name] for name in requested]
+
         # Determine which groups to generate
         all_groups = ['price', 'trend', 'momentum', 'volatility', 'volume', 'regime']
-        groups_to_generate = feature_groups or all_groups
-        
-        logger.info(f"Generating features for groups: {groups_to_generate}")
+        if selected_specs:
+            groups_to_generate = sorted({spec.category for spec in selected_specs})
+        else:
+            groups_to_generate = feature_groups or all_groups
+
+        logger.info(
+            f"Generating features for groups: {groups_to_generate}" + (
+                f" with indicators: {include_indicators}" if include_indicators else ""
+            )
+        )
         
         # Start with copy of input
         features = df.copy()
@@ -187,15 +246,19 @@ class FeatureEngine:
             if dropped > 0:
                 logger.info(f"Dropped {dropped} rows with NaN values")
         
+        # If specific indicators were requested, filter down to their columns
+        if selected_specs:
+            features = self._filter_indicator_columns(features, selected_specs)
+
         # Cache results
         if use_cache and cache_key:
             self._cache[cache_key] = features
-        
+
         logger.info(
             f"Generated {len(features.columns)} total features, "
             f"{len(features)} rows"
         )
-        
+
         return features
     
     def generate_incremental(
@@ -401,6 +464,32 @@ class FeatureEngine:
                 result[col] = (df[col] - median) / (iqr + 1e-10)
         
         return result
+
+    def _filter_indicator_columns(
+        self,
+        features: pd.DataFrame,
+        selected_specs: List[IndicatorSpec]
+    ) -> pd.DataFrame:
+        """Keep only the columns tied to the selected indicators (plus OHLCV)."""
+        base_cols = ['open', 'high', 'low', 'close', 'volume']
+        allowed_cols = set(base_cols)
+
+        for spec in selected_specs:
+            prefixes = self._indicator_column_map.get(spec.name.lower())
+            if not prefixes:
+                logger.warning(f"No column mapping for indicator '{spec.name}', keeping all columns")
+                continue
+            for col in features.columns:
+                if col in base_cols:
+                    continue
+                if any(col.startswith(prefix) for prefix in prefixes):
+                    allowed_cols.add(col)
+
+        filtered = features[[col for col in features.columns if col in allowed_cols]]
+        missing = [spec.name for spec in selected_specs if not self._indicator_column_map.get(spec.name.lower())]
+        if missing:
+            logger.warning(f"Indicators without mappings (columns kept unfiltered for them): {missing}")
+        return filtered
     
     def save_cache(self, path: str) -> None:
         """Save feature cache to disk."""

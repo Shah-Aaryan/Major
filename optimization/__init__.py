@@ -20,6 +20,10 @@ from optimization.bayesian_optimizer import BayesianOptimizer
 from optimization.random_search import RandomSearchOptimizer
 from optimization.evolutionary_optimizer import EvolutionaryOptimizer
 from optimization.ml_parameter_adjuster import MLParameterAdjuster
+from optimization.optimizer_registry import (
+    OptimizerSpec,
+    get_optimizer_registry,
+)
 
 __all__ = [
     'BaseOptimizer',
@@ -28,5 +32,7 @@ __all__ = [
     'BayesianOptimizer',
     'RandomSearchOptimizer',
     'EvolutionaryOptimizer',
-    'MLParameterAdjuster'
+    'MLParameterAdjuster',
+    'OptimizerSpec',
+    'get_optimizer_registry'
 ]
