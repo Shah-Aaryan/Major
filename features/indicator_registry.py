@@ -55,7 +55,7 @@ class IndicatorSpec:
     tags: Optional[List[str]] = None
 
 
-# NOTE: Keep this list exactly at 50 entries.
+# NOTE: Keep this list exactly at 52 entries.
 _INDICATORS: List[IndicatorSpec] = [
     IndicatorSpec("Simple Moving Average (SMA)", "trend", True, calculate_sma),
     IndicatorSpec("Exponential Moving Average (EMA)", "trend", True, calculate_ema),
@@ -111,7 +111,7 @@ _INDICATORS: List[IndicatorSpec] = [
     IndicatorSpec("EMA Slope", "trend", True, calculate_ema_slope),
 ]
 
-assert len(_INDICATORS) == 50, "Indicator registry must contain exactly 50 entries"
+assert len(_INDICATORS) == 52, "Indicator registry must contain exactly 52 entries"
 
 
 def get_indicator_registry(implemented_only: bool = False) -> List[IndicatorSpec]:

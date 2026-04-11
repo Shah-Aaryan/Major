@@ -26,6 +26,9 @@ env/
 cache/
 .cache/
 
+# Raw data downloads
+data/raw/
+
 # OS
 .DS_Store
 Thumbs.db

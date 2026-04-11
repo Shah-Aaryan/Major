@@ -48,7 +48,7 @@ _OPTIMIZERS = [
     OptimizerSpec("particle_swarm", "Particle Swarm Optimization", "swarm", "implemented", ParticleSwarmOptimizer),
     OptimizerSpec("simulated_annealing", "Simulated Annealing", "trajectory", "implemented", SimulatedAnnealingOptimizer),
     OptimizerSpec("genetic_algorithm", "Genetic Algorithm", "evolutionary", "implemented", EvolutionaryOptimizer, False, "GA via DEAP backend"),
-    OptimizerSpec("evolution_strategies", "Evolution Strategies ((μ, λ)-ES)", "evolutionary", "implemented", EvolutionStrategiesOptimizer),
+    OptimizerSpec("evolution_strategies", "Evolution Strategies ((mu, lambda)-ES)", "evolutionary", "implemented", EvolutionStrategiesOptimizer),
     OptimizerSpec("nsga_ii", "NSGA-II", "multi-objective", "implemented", MultiObjectiveOptimizer, True),
     OptimizerSpec("nsga_iii", "NSGA-III", "many-objective", "implemented", MultiObjectiveOptimizer, True),
     OptimizerSpec("hyperband_asha", "Hyperband + ASHA", "multi-fidelity", "implemented", HyperbandASHAOptimizer),

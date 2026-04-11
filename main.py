@@ -32,6 +32,11 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -191,7 +196,7 @@ Examples:
 def run_research_pipeline(args):
     """Run the main research pipeline."""
     from research_pipeline import ResearchPipeline
-    from config.settings import OptimizationConfig, BacktestConfig
+    from config.settings import OptimizationConfig, BacktestConfig, DataConfig
     
     # Parse timeframes
     timeframes = [tf.strip() for tf in args.timeframes.split(',')]
@@ -231,6 +236,16 @@ def run_research_pipeline(args):
             data_paths = [str(data_path)]
         elif data_path.is_dir():
             data_paths = [str(f) for f in data_path.glob('*.csv')]
+        else:
+            # Convenience fallback: allow passing only filename and resolve in common data dirs.
+            data_config = DataConfig()
+            candidate_dirs = [Path(data_config.data_dir), Path('./data'), Path('./data/raw')]
+            for candidate_dir in candidate_dirs:
+                candidate = candidate_dir / args.data
+                if candidate.is_file():
+                    data_paths = [str(candidate)]
+                    logger.info(f"Resolved data file to: {candidate}")
+                    break
     
     if not data_paths:
         logger.error("No data files found. Please provide --data argument.")
