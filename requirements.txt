@@ -28,6 +28,10 @@ plotly>=5.18.0
 # Data Validation
 pydantic>=2.5.0
 
+# Backend API
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
 # Real-time Data
 python-binance>=1.0.19
 websocket-client>=1.6.0

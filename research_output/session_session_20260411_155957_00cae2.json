@@ -1,0 +1,11 @@
+{
+  "session_id": "session_20260411_155957_00cae2",
+  "start_time": null,
+  "end_time": "2026-04-11T10:29:57.563809",
+  "summary": {
+    "message": "Research session failed."
+  },
+  "overall_findings": {},
+  "results": [],
+  "error": "Invalid frequency: string. Failed to parse with error message: ValueError(\"Invalid frequency: string. Failed to parse with error message: KeyError('string').\")"
+}

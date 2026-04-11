@@ -153,6 +153,39 @@ SUPPORTED_INDICATORS = {
         "default_period": 20,
         "feature_pattern": "volume_sma_{period}"
     },
+    "stoch_rsi": {
+        "params": ["period"],
+        "default_period": 14,
+        "feature_pattern": "stoch_rsi"
+    },
+    "williams_r": {
+        "params": ["period"],
+        "default_period": 14,
+        "feature_pattern": "williams_r"
+    },
+    "cci": {
+        "params": ["period"],
+        "default_period": 20,
+        "feature_pattern": "cci"
+    },
+    "roc": {
+        "params": ["period"],
+        "default_period": 12,
+        "feature_pattern": "roc_{period}"
+    },
+    "obv": {
+        "params": [],
+        "feature_pattern": "obv"
+    },
+    "vwap": {
+        "params": [],
+        "feature_pattern": "vwap"
+    },
+    "mfi": {
+        "params": ["period"],
+        "default_period": 14,
+        "feature_pattern": "mfi"
+    },
     "price": {
         "params": [],
         "feature_pattern": "close"
@@ -162,6 +195,7 @@ SUPPORTED_INDICATORS = {
         "feature_pattern": "close"
     }
 }
+
 
 
 @dataclass
@@ -303,7 +337,8 @@ class StrategyParser:
         "crosses": r"\bcrosses\s+(above|below)\b",
         "operator": r"(>=|<=|>|<|==|!=)",
         "number": r"-?\d+\.?\d*",
-        "indicator": r"\b(\w+)(?:\s*\(\s*(\d+)\s*\))?",
+        "indicator": r"\b([a-zA-Z][a-zA-Z0-9_%]*)(?:\s*\(\s*(\d+)\s*\))?",
+
     }
     
     def __init__(self, custom_indicators: Optional[Dict[str, Any]] = None):

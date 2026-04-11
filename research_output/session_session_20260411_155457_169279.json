@@ -1,0 +1,65 @@
+{
+  "session_id": "session_20260411_155457_169279",
+  "start_time": "2026-04-11T15:54:57.556967",
+  "end_time": "2026-04-11T15:57:12.587943",
+  "summary": {
+    "session_id": "session_20260411_155457_169279",
+    "n_experiments": 1,
+    "ml_recommended_count": 1,
+    "ml_recommended_pct": 1.0,
+    "avg_sharpe_improvement": 0.9054761865641009,
+    "strategies_tested": [
+      "rsi_mean_reversion"
+    ],
+    "total_optimization_time": 111.58058166503906
+  },
+  "overall_findings": {
+    "total_experiments": 1,
+    "ml_recommended_count": 1,
+    "ml_recommended_pct": 1.0,
+    "avg_sharpe_improvement": 0.9054761865641009,
+    "best_scenario": {
+      "strategy": "rsi_mean_reversion",
+      "symbol": "BTCUSDT",
+      "timeframe": "5m",
+      "improvement": 0.9054761865641009
+    },
+    "worst_scenario": {
+      "strategy": "rsi_mean_reversion",
+      "symbol": "BTCUSDT",
+      "timeframe": "5m",
+      "improvement": 0.9054761865641009
+    },
+    "by_strategy": {
+      "rsi_mean_reversion": {
+        "n_experiments": 1,
+        "ml_recommended_pct": 1.0,
+        "avg_sharpe_improvement": 0.9054761865641009
+      }
+    },
+    "by_timeframe": {
+      "5m": {
+        "n_experiments": 1,
+        "ml_recommended_pct": 1.0,
+        "avg_sharpe_improvement": 0.9054761865641009
+      }
+    },
+    "key_insights": [
+      "ML optimization consistently improved strategy performance",
+      "rsi_mean_reversion benefits most from ML optimization",
+      "ML helps more on 5m timeframe"
+    ]
+  },
+  "results": [
+    {
+      "strategy": "rsi_mean_reversion",
+      "symbol": "BTCUSDT",
+      "timeframe": "5m",
+      "ml_recommended": true,
+      "confidence": 0.8999999999999999,
+      "sharpe_improvement": 0.9054761865641009,
+      "best_optimizer": "bayesian_gp",
+      "report_path": "research_output\\reports\\BTCUSDT_5m_rsi_mean_reversion_20260411_155712.md"
+    }
+  ]
+}

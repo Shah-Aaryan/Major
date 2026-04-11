@@ -114,7 +114,7 @@ class FeatureEngine:
             trend_threshold=self.config.adx_trend_threshold
         )
 
-        # Registry of the full 50-indicator surface (implemented + planned)
+        # Registry of the full 52-indicator surface (implemented + planned)
         self.indicator_registry: List[IndicatorSpec] = get_indicator_registry()
 
         # Map indicator names (lowercase) to the column prefixes they emit.
