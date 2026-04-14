@@ -168,6 +168,51 @@ Examples:
         action='store_true',
         help='Run paper trading simulation with ML-optimized parameters'
     )
+
+    # Hybrid human+live optimization mode
+    parser.add_argument(
+        '--hybrid-live',
+        action='store_true',
+        help=(
+            'Hybrid mode: start from human params, replace last N historical windows '
+            'with newest CoinGecko data, run all optimizers, and compare results'
+        )
+    )
+
+    parser.add_argument(
+        '--hybrid-replace-windows',
+        type=int,
+        default=2,
+        help='How many of the last walk-forward windows to replace with CoinGecko data (default: 2)'
+    )
+
+    parser.add_argument(
+        '--coingecko-days',
+        type=int,
+        default=1,
+        help='How many days of CoinGecko data to pull for replacement (default: 1)'
+    )
+
+    parser.add_argument(
+        '--human-params',
+        type=str,
+        default=None,
+        help='JSON object with human parameter overrides (e.g. {"rsi_buy_threshold":30,"rsi_sell_threshold":70})'
+    )
+
+    parser.add_argument(
+        '--human-param',
+        action='append',
+        default=None,
+        help='Repeatable human override as key=value (PowerShell-friendly). Example: --human-param rsi_buy_threshold=30'
+    )
+
+    parser.add_argument(
+        '--human-params-file',
+        type=str,
+        default=None,
+        help='Path to a JSON file with human parameter overrides'
+    )
     
     parser.add_argument(
         '--replay-speed',
@@ -456,6 +501,116 @@ def run_paper_trading(args):
                   f"P&L: ${trade.pnl:.2f} ({trade.pnl_pct:+.1f}%) [{trade.exit_reason}]")
 
 
+def run_hybrid_live(args):
+    """Run hybrid human+live optimization workflow (single file, single timeframe, single strategy)."""
+    from hybrid_flow import run_hybrid_live_optimization
+    import json
+
+    if not args.data:
+        logger.error("Hybrid mode requires --data pointing to a CSV file")
+        return None
+
+    # Resolve a single data file
+    data_path = Path(args.data)
+    if data_path.is_dir():
+        csvs = sorted(data_path.glob('*.csv'))
+        if not csvs:
+            logger.error(f"No CSV files found in directory: {data_path}")
+            return None
+        data_path = csvs[0]
+
+    if not data_path.is_file():
+        # Convenience fallback for bare filename
+        from config.settings import DataConfig
+
+        data_config = DataConfig()
+        candidate_dirs = [Path(data_config.data_dir), Path('./data'), Path('./data/raw')]
+        for candidate_dir in candidate_dirs:
+            candidate = candidate_dir / args.data
+            if candidate.is_file():
+                data_path = candidate
+                logger.info(f"Resolved data file to: {candidate}")
+                break
+
+    if not data_path.is_file():
+        logger.error(f"Could not resolve data file: {args.data}")
+        return None
+
+    # Choose exactly one timeframe
+    timeframes = [tf.strip() for tf in args.timeframes.split(',') if tf.strip()]
+    timeframe = timeframes[0] if timeframes else '1m'
+    if len(timeframes) > 1:
+        logger.warning(f"Hybrid mode runs a single timeframe; using: {timeframe}")
+
+    # Choose exactly one strategy
+    if args.all_strategies:
+        logger.warning("Hybrid mode runs a single strategy; using: rsi_mean_reversion")
+        strategy_name = 'rsi_mean_reversion'
+    else:
+        strategy_name = args.strategy or 'rsi_mean_reversion'
+
+    # Merge --human-param key=value overrides into the JSON overrides
+    def _parse_cli_value(raw: str):
+        raw = raw.strip()
+        if raw.lower() in {'true', 'false'}:
+            return raw.lower() == 'true'
+        try:
+            if '.' in raw:
+                return float(raw)
+            return int(raw)
+        except ValueError:
+            return raw
+
+    merged_overrides = {}
+    if args.human_param:
+        for item in args.human_param:
+            if '=' not in item:
+                logger.warning(f"Ignoring invalid --human-param (expected key=value): {item}")
+                continue
+            key, value = item.split('=', 1)
+            merged_overrides[key.strip()] = _parse_cli_value(value)
+
+    human_params_json = args.human_params
+    if merged_overrides:
+        if human_params_json:
+            try:
+                base = json.loads(human_params_json)
+                if isinstance(base, dict):
+                    base.update(merged_overrides)
+                    human_params_json = json.dumps(base)
+                else:
+                    human_params_json = json.dumps(merged_overrides)
+            except Exception:
+                human_params_json = json.dumps(merged_overrides)
+        else:
+            human_params_json = json.dumps(merged_overrides)
+
+    artifacts = run_hybrid_live_optimization(
+        data_path=str(data_path),
+        symbol=args.symbol,
+        timeframe=timeframe,
+        strategy_name=strategy_name,
+        output_dir=args.output,
+        n_trials=args.trials if not args.quick else min(20, args.trials),
+        wf_windows=args.wf_windows,
+        wf_train_ratio=args.wf_train_ratio,
+        replace_windows=args.hybrid_replace_windows,
+        coingecko_days=args.coingecko_days,
+        human_params_json=human_params_json,
+        human_params_file=args.human_params_file,
+    )
+
+    print("\n" + "=" * 60)
+    print("HYBRID LIVE OPTIMIZATION COMPLETE")
+    print("=" * 60)
+    print(f"JSON: {artifacts.result_json_path}")
+    print(f"Report: {artifacts.report_md_path}")
+    print("(Edit human params and re-run using --human-params-file research_output/human_params_template.json)")
+    print("=" * 60)
+
+    return artifacts
+
+
 def main():
     """Main entry point."""
     print("""
@@ -480,6 +635,8 @@ def main():
     # Run appropriate mode
     if args.paper_trade:
         run_paper_trading(args)
+    elif args.hybrid_live:
+        run_hybrid_live(args)
     else:
         run_research_pipeline(args)
 

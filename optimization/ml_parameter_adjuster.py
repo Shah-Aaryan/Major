@@ -662,6 +662,7 @@ class MLParameterAdjuster:
         if method_key == "grid_search":
             grid_args = dict(common_args)
             grid_args.pop('n_iterations', None)
+            grid_args.pop('random_state', None)
             return GridSearchOptimizer(**grid_args, **kwargs)
 
         if method_key in {"genetic_algorithm"}:
@@ -683,7 +684,16 @@ class MLParameterAdjuster:
             return CMAESOptimizer(**common_args, **kwargs)
 
         if method_key == "hyperband_asha":
-            return HyperbandASHAOptimizer(**common_args, **kwargs)
+            # Hyperband/ASHA expects objective_function(params, resource).
+            # Our base objective_function wrapper is objective_function(params) -> float.
+            base_objective = common_args['objective_function']
+
+            def objective_with_resource(params: Dict[str, Any], _resource: int) -> float:
+                return base_objective(params)
+
+            hb_args = dict(common_args)
+            hb_args['objective_function'] = objective_with_resource
+            return HyperbandASHAOptimizer(**hb_args, **kwargs)
 
         if method_key in {"nsga_ii", "nsga_iii"}:
             return MultiObjectiveOptimizer(**common_args, **kwargs)
