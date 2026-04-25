@@ -24,6 +24,101 @@ from analysis.failure_detector import FailureDetector, FailurePattern
 logger = logging.getLogger(__name__)
 
 
+def _param_change_reason(param: str, human_val: Any, ml_val: Any) -> str:
+    """Heuristic, human-readable rationale for a parameter change.
+
+    This keeps reports explainable without depending on any single optimizer.
+    """
+
+    try:
+        # RSI parameters
+        if param == 'rsi_lookback':
+            return (
+                'Longer lookback smooths RSI (fewer false signals)'
+                if ml_val > human_val
+                else 'Shorter lookback makes RSI more reactive (earlier signals)'
+            )
+
+        if param == 'rsi_buy_threshold':
+            return (
+                'Lower buy threshold waits for deeper oversold (more conservative entry)'
+                if ml_val < human_val
+                else 'Higher buy threshold enters earlier (more trades, more noise risk)'
+            )
+
+        if param == 'rsi_sell_threshold':
+            return (
+                'Higher sell threshold waits for stronger overbought (later exit)'
+                if ml_val > human_val
+                else 'Lower sell threshold exits earlier (locks profits sooner)'
+            )
+
+        # Regime/trend filter
+        if param == 'adx_threshold':
+            return (
+                'Higher ADX threshold treats fewer markets as "trending" (more signals allowed)'
+                if ml_val > human_val
+                else 'Lower ADX threshold avoids trends more aggressively (fewer mean-reversion traps)'
+            )
+
+        # Risk management
+        if param == 'stop_loss_pct':
+            return (
+                'Wider stop gives trades more room (fewer stop-outs)'
+                if ml_val > human_val
+                else 'Tighter stop cuts losers faster (lower per-trade downside)'
+            )
+
+        if param == 'take_profit_pct':
+            return (
+                'Higher take-profit aims for larger moves (fewer exits)'
+                if ml_val > human_val
+                else 'Lower take-profit realizes gains sooner (higher hit-rate, smaller wins)'
+            )
+
+        if param == 'trailing_stop_pct':
+            return (
+                'Wider trailing stop allows trends to run (less whipsaw)'
+                if ml_val > human_val
+                else 'Tighter trailing stop locks profits faster (more premature exits)'
+            )
+
+        # Trading frequency / pacing
+        if param == 'cooldown_period':
+            return (
+                'Longer cooldown reduces overtrading in chop'
+                if ml_val > human_val
+                else 'Shorter cooldown increases trade frequency'
+            )
+
+        if param == 'max_trades_per_day':
+            return (
+                'Higher cap permits more signals (potentially more noise)'
+                if ml_val > human_val
+                else 'Lower cap forces selectivity (reduces churn)'
+            )
+
+        if param == 'max_holding_time':
+            return (
+                'Longer holds let winners develop (more exposure to reversals)'
+                if ml_val > human_val
+                else 'Shorter holds reduce time risk (faster mean reversion capture)'
+            )
+
+        # Sizing
+        if param == 'position_size_pct':
+            return (
+                'Larger position increases exposure (higher variance)'
+                if ml_val > human_val
+                else 'Smaller position reduces exposure (lower variance)'
+            )
+
+    except Exception:
+        return ""
+
+    return ""
+
+
 @dataclass
 class ComparisonReport:
     """
@@ -167,6 +262,9 @@ class ComparisonReport:
             for param in self.most_impactful_params[:5]:
                 change = self.parameter_changes.get(param, {})
                 md.append(f"- **{param}**: {change.get('human', 'N/A')} -> {change.get('ml', 'N/A')}")
+                reason = change.get('reason')
+                if reason:
+                    md.append(f"  - Reason: {reason}")
             md.append("")
         
         # Recommendations
@@ -231,6 +329,7 @@ def generate_full_report(
     condition_analyzer: Optional[ConditionAnalyzer] = None,
     failure_detector: Optional[FailureDetector] = None,
     method_comparison: Optional[Dict[str, Dict[str, float]]] = None,
+    best_method_override: Optional[str] = None,
     human_params: Optional[Dict[str, Any]] = None,
     ml_params: Optional[Dict[str, Any]] = None,
     data_period: str = ""
@@ -295,7 +394,8 @@ def generate_full_report(
                         (ml_params[param] - human_params[param]) / abs(human_params[param]) * 100
                         if isinstance(human_params[param], (int, float)) and human_params[param] != 0
                         else 0
-                    )
+                    ),
+                    'reason': _param_change_reason(param, human_params[param], ml_params[param])
                 }
         
         # Find most impactful (largest changes)
@@ -338,6 +438,9 @@ def generate_full_report(
             key=lambda x: x[1].get('mean_improvement_pct', 0)
         )
         report.best_method = best_method[0]
+
+    if best_method_override:
+        report.best_method = best_method_override
     
     # Generate key findings
     key_findings = []

@@ -117,6 +117,60 @@ def _fetch_live_ohlcv_from_coingecko(
     return out
 
 
+def _fetch_live_ohlcv_from_coingecko_polling(
+    symbol: str,
+    timeframe: str,
+    stream_seconds: int,
+    *,
+    poll_interval_seconds: float = 5.0,
+) -> pd.DataFrame:
+    """Pseudo-stream "live" OHLCV by polling CoinGecko.
+
+    CoinGecko's public API is HTTP (request/response) and does not provide a WebSocket
+    stream in this project. This function approximates streaming by repeatedly calling
+    `simple/price` and building OHLCV candles from the sampled prices.
+
+    Volume is not available from `simple/price`, so we set volume=0.
+    """
+
+    if stream_seconds <= 0:
+        return pd.DataFrame()
+    if poll_interval_seconds <= 0:
+        poll_interval_seconds = 1.0
+
+    cg = CoinGeckoClient()
+    rule = _timeframe_to_rule(timeframe)
+
+    points: List[Dict[str, Any]] = []
+    end_time = time.time() + float(stream_seconds)
+
+    # Throttle: respect the client-side rate limiter too.
+    while time.time() < end_time:
+        try:
+            price_data = cg.get_price([symbol], include_market_cap=False, include_24h_vol=False, include_24h_change=False)
+            coin_id = cg.get_coin_id(symbol)
+            price = float(price_data.get(coin_id, {}).get("usd", 0.0))
+            if price > 0:
+                points.append({"timestamp": datetime.utcnow(), "price": price})
+        except Exception as e:
+            logger.warning("CoinGecko polling failed: %s", e)
+
+        time.sleep(float(poll_interval_seconds))
+
+    if not points:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(points)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("UTC").dt.tz_localize(None)
+    df = df.set_index("timestamp").sort_index()
+
+    ohlc = df["price"].resample(rule).ohlc()
+    ohlc["volume"] = 0.0
+    ohlc = ohlc.dropna(subset=["open", "high", "low", "close"]).sort_index()
+    ohlc = ohlc[~ohlc.index.duplicated(keep="last")]
+    return ohlc
+
+
 def _to_utc_naive_index(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize a DataFrame's DatetimeIndex to UTC-naive timestamps.
 
@@ -197,8 +251,19 @@ def _replace_last_windows(
     return combined, meta
 
 
-def _optimizer_kwargs_for_method(method_key: str, opt_config: OptimizationConfig) -> Dict[str, Any]:
-    """Best-effort config -> kwargs mapping per optimizer method."""
+def _optimizer_kwargs_for_method(
+    method_key: str,
+    opt_config: OptimizationConfig,
+    *,
+    per_window_iters: int,
+    n_param_dims: int,
+) -> Dict[str, Any]:
+    """Best-effort config -> kwargs mapping per optimizer method.
+
+    Note: Some methods have *implicit* evaluation multipliers (population-based).
+    For hybrid mode we scale those down when `per_window_iters` is small so the
+    full sweep can finish in a reasonable time.
+    """
 
     if method_key == "grid_search":
         return {"grid_resolution": opt_config.grid_resolution}
@@ -212,15 +277,20 @@ def _optimizer_kwargs_for_method(method_key: str, opt_config: OptimizationConfig
         return {"sampling_strategy": strategy}
 
     if method_key == "genetic_algorithm":
+        # Scale population for small iteration budgets.
+        population_size = min(opt_config.es_population_size, max(10, 5 * per_window_iters))
         return {
-            "population_size": opt_config.es_population_size,
+            "population_size": population_size,
             "mutation_prob": opt_config.es_mutation_rate,
             "crossover_prob": opt_config.es_crossover_rate,
         }
 
     if method_key == "differential_evolution":
+        # SciPy DE uses popsize * ndim evals per generation.
+        # Keep popsize small for hybrid sweeps.
+        population_size = min(opt_config.de_population_size, max(3, 1 + per_window_iters))
         return {
-            "population_size": opt_config.de_population_size,
+            "population_size": population_size,
             "mutation": opt_config.de_mutation,
             "recombination": opt_config.de_recombination,
         }
@@ -232,9 +302,29 @@ def _optimizer_kwargs_for_method(method_key: str, opt_config: OptimizationConfig
         }
 
     if method_key == "particle_swarm":
-        return {"swarm_size": opt_config.es_population_size}
+        swarm_size = min(30, max(10, 5 * per_window_iters))
+        return {"swarm_size": swarm_size}
+
+    if method_key == "evolution_strategies":
+        # ES evaluates `lambd` offspring per iteration.
+        mu = min(10, max(3, per_window_iters + 2))
+        lambd = min(40, max(10, mu * 4))
+        return {"mu": mu, "lambd": lambd}
+
+    if method_key == "hyperband_asha":
+        # Keep defaults but ensure reduction_factor is sane.
+        return {"reduction_factor": 3}
 
     return {}
+
+
+def _min_iters_required(method_key: str) -> int:
+    """Minimum n_iterations needed for method to function."""
+
+    # skopt-based GP requires n_calls >= 10.
+    if method_key == "bayesian_gp":
+        return 10
+    return 1
 
 
 def _run_backtest(strategy, data_with_features: pd.DataFrame, params: Dict[str, Any], bt_config: BtConfig) -> Dict[str, Any]:
@@ -267,6 +357,8 @@ def run_hybrid_live_optimization(
     wf_train_ratio: float,
     replace_windows: int,
     coingecko_days: int,
+    stream_seconds: int = 20,
+    stream_interval_seconds: float = 5.0,
     human_params_json: Optional[str] = None,
     human_params_file: Optional[str] = None,
 ) -> HybridRunArtifacts:
@@ -302,7 +394,19 @@ def run_hybrid_live_optimization(
         raw = resampler.resample(raw, timeframe)
 
     # Fetch live + replace last windows
+    # Base source: CoinGecko market_chart (recent points up to near-now).
     live = _fetch_live_ohlcv_from_coingecko(symbol=symbol, timeframe=timeframe, days=coingecko_days)
+    # Newest source: CoinGecko polling (approximates "live" by sampling current price).
+    polled = _fetch_live_ohlcv_from_coingecko_polling(
+        symbol=symbol,
+        timeframe=timeframe,
+        stream_seconds=stream_seconds,
+        poll_interval_seconds=stream_interval_seconds,
+    )
+    if not polled.empty:
+        live = pd.concat([_to_utc_naive_index(live), _to_utc_naive_index(polled)], axis=0)
+        live = live.sort_index()
+        live = live[~live.index.duplicated(keep="last")]
     hybrid_raw, replace_meta = _replace_last_windows(
         historical_ohlcv=raw,
         live_ohlcv=live,
@@ -334,6 +438,7 @@ def run_hybrid_live_optimization(
 
     # Objective function for adjuster
     param_bounds = strategy.get_parameter_bounds()
+    n_param_dims = len(param_bounds)
 
     def objective_func(_strategy_name: str, params: Dict[str, Any], train_data: pd.DataFrame) -> float:
         strategy.update_parameters(params)
@@ -349,7 +454,13 @@ def run_hybrid_live_optimization(
 
     # Optimizer methods (skip known-incompatible multi-objective wrappers)
     implemented = [spec for spec in get_optimizer_registry(status="implemented")]
-    method_keys = [spec.key for spec in implemented if spec.key not in {"nsga_ii", "nsga_iii"}]
+    # Skip multi-objective wrappers for this single-objective hybrid flow.
+    # Also skip known-broken optimizer(s) so the sweep can complete.
+    method_keys = [
+        spec.key
+        for spec in implemented
+        if spec.key not in {"nsga_ii", "nsga_iii", "cma_es"}
+    ]
 
     method_results: Dict[str, Dict[str, Any]] = {}
 
@@ -368,12 +479,45 @@ def run_hybrid_live_optimization(
         for method_key in method_keys:
             start = time.time()
             try:
+                # Grid search scales exponentially with number of parameters.
+                # For this project, strategies typically have many tunable params
+                # (base risk mgmt + strategy-specific), so grid search becomes infeasible.
+                if method_key == "grid_search":
+                    # Minimal meaningful resolution is 2; estimate combos and skip if too large.
+                    min_resolution = 2
+                    est_points = min_resolution ** max(1, n_param_dims)
+                    max_points = 5000
+                    if est_points > max_points:
+                        logger.warning(
+                            "Skipping grid_search: estimated %s combinations (min res=%s, dims=%s) exceeds cap=%s",
+                            est_points,
+                            min_resolution,
+                            n_param_dims,
+                            max_points,
+                        )
+                        continue
                 # Respect overall budget: split trials across windows.
                 # Example: n_trials=20, wf_windows=5 -> 4 iterations per window.
-                per_window_iters = max(1, n_trials // max(1, wf_windows))
+                base_per_window_iters = max(1, n_trials // max(1, wf_windows))
+                min_required = _min_iters_required(method_key)
+                if base_per_window_iters < min_required:
+                    logger.warning(
+                        "Skipping %s: per-window iterations=%s < required=%s. Increase --trials or reduce --wf-windows.",
+                        method_key,
+                        base_per_window_iters,
+                        min_required,
+                    )
+                    continue
+
+                per_window_iters = base_per_window_iters
 
                 def optimize_func(train_df: pd.DataFrame) -> Dict[str, Any]:
-                    extra_kwargs = _optimizer_kwargs_for_method(method_key, opt_config)
+                    extra_kwargs = _optimizer_kwargs_for_method(
+                        method_key,
+                        opt_config,
+                        per_window_iters=per_window_iters,
+                        n_param_dims=n_param_dims,
+                    )
                     result = adjuster.optimize_strategy(
                         strategy_name=strategy.__class__.__name__,
                         train_data=train_df,
@@ -398,6 +542,9 @@ def run_hybrid_live_optimization(
                     anchored=False,
                     min_train_size=100,
                 )
+
+                if wf is None or wf.aggregate_test_metrics is None:
+                    raise RuntimeError("walk-forward returned no aggregate metrics")
 
                 elapsed = time.time() - start
                 score = wf.aggregate_test_metrics.sharpe_ratio
@@ -446,6 +593,7 @@ def run_hybrid_live_optimization(
         human_params=human_params,
         ml_params=best_params,
         data_period=data_period,
+        best_method_override=best_method,
     )
 
     out_dir = Path(output_dir)

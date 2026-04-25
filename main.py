@@ -194,6 +194,24 @@ Examples:
     )
 
     parser.add_argument(
+        '--hybrid-stream-seconds',
+        type=int,
+        default=20,
+        help=(
+            'How many seconds to poll CoinGecko for current price samples and merge them '
+            'into the latest replacement data (default: 20). '
+            'Set 0 to disable this live-like sampling.'
+        )
+    )
+
+    parser.add_argument(
+        '--hybrid-stream-interval',
+        type=float,
+        default=5.0,
+        help='Seconds between CoinGecko polls during --hybrid-stream-seconds (default: 5.0)'
+    )
+
+    parser.add_argument(
         '--human-params',
         type=str,
         default=None,
@@ -596,6 +614,8 @@ def run_hybrid_live(args):
         wf_train_ratio=args.wf_train_ratio,
         replace_windows=args.hybrid_replace_windows,
         coingecko_days=args.coingecko_days,
+        stream_seconds=args.hybrid_stream_seconds,
+        stream_interval_seconds=args.hybrid_stream_interval,
         human_params_json=human_params_json,
         human_params_file=args.human_params_file,
     )
