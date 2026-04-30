@@ -372,10 +372,16 @@ class BacktestEngine:
         # Calculate position size
         available_capital = self.capital * self.config.position_size_pct
         commission = available_capital * self.config.commission_pct
-        available_capital -= commission
-        
-        quantity = available_capital / price
-        
+
+        # Funds available to invest after paying open commission
+        investable = available_capital - commission
+        if investable <= 0:
+            logger.warning("Investable capital <= 0 after commission; skipping open position")
+            return
+
+        quantity = investable / price
+        position_value = quantity * price
+
         self.position = {
             'side': side,
             'entry_price': price,
@@ -384,13 +390,13 @@ class BacktestEngine:
             'entry_bar_idx': len(self.equity_history),
             'signal_metadata': signal.metadata
         }
-        
-        # Deduct commission
-        self.capital -= commission
-        
+
+        # Deduct both the invested principal and the commission from capital
+        self.capital -= (position_value + commission)
+
         logger.debug(
             f"Opened {side} position at {price:.4f}, "
-            f"quantity={quantity:.6f}"
+            f"quantity={quantity:.6f}, invested={position_value:.2f}, commission={commission:.2f}"
         )
     
     def _close_position(

@@ -212,6 +212,13 @@ Examples:
     )
 
     parser.add_argument(
+        '--sample-rows',
+        type=int,
+        default=0,
+        help='Use a smaller dataset by keeping only the last N rows (default: 0 = disabled)'
+    )
+
+    parser.add_argument(
         '--human-params',
         type=str,
         default=None,
@@ -616,6 +623,7 @@ def run_hybrid_live(args):
         coingecko_days=args.coingecko_days,
         stream_seconds=args.hybrid_stream_seconds,
         stream_interval_seconds=args.hybrid_stream_interval,
+        sample_rows=args.sample_rows,
         human_params_json=human_params_json,
         human_params_file=args.human_params_file,
     )

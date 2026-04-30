@@ -14,6 +14,7 @@ This is designed to be invoked from main.py via `--hybrid-live`.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import time
 from dataclasses import dataclass
@@ -32,7 +33,6 @@ from data.resampler import DataResampler
 from features.feature_engine import FeatureEngine
 from optimization.ml_parameter_adjuster import MLParameterAdjuster
 from optimization.optimizer_registry import get_optimizer_registry
-from realtime.coingecko_client import CoinGeckoClient
 from strategies.bollinger_breakout import BollingerBreakoutStrategy
 from strategies.ema_crossover import EMACrossoverStrategy
 from strategies.rsi_mean_reversion import RSIMeanReversionStrategy
@@ -77,98 +77,6 @@ def _load_human_params(human_params_json: Optional[str], human_params_file: Opti
     return params
 
 
-def _fetch_live_ohlcv_from_coingecko(
-    symbol: str,
-    timeframe: str,
-    days: int,
-) -> pd.DataFrame:
-    """Fetch recent market data from CoinGecko and convert to OHLCV.
-
-    Uses market_chart (price+volume) and resamples it into OHLCV for the requested timeframe.
-    """
-
-    cg = CoinGeckoClient()
-
-    # market_chart returns a time series of price points (not OHLC). We'll convert via resample.
-    raw = cg.get_historical_data(symbol=symbol, days=days, interval="")
-    if raw.empty:
-        return pd.DataFrame()
-
-    rule = _timeframe_to_rule(timeframe)
-
-    price = raw["price"].astype(float)
-    ohlc = price.resample(rule).ohlc()
-
-    volume = None
-    if "volume" in raw.columns:
-        volume = raw["volume"].astype(float).resample(rule).sum(min_count=1)
-
-    out = ohlc.rename(columns={"open": "open", "high": "high", "low": "low", "close": "close"})
-    if volume is not None:
-        out["volume"] = volume
-    else:
-        out["volume"] = 0.0
-
-    out = out.dropna(subset=["open", "high", "low", "close"]).sort_index()
-
-    # CoinGecko market_chart sometimes yields duplicates / uneven spacing.
-    out = out[~out.index.duplicated(keep="last")]
-
-    return out
-
-
-def _fetch_live_ohlcv_from_coingecko_polling(
-    symbol: str,
-    timeframe: str,
-    stream_seconds: int,
-    *,
-    poll_interval_seconds: float = 5.0,
-) -> pd.DataFrame:
-    """Pseudo-stream "live" OHLCV by polling CoinGecko.
-
-    CoinGecko's public API is HTTP (request/response) and does not provide a WebSocket
-    stream in this project. This function approximates streaming by repeatedly calling
-    `simple/price` and building OHLCV candles from the sampled prices.
-
-    Volume is not available from `simple/price`, so we set volume=0.
-    """
-
-    if stream_seconds <= 0:
-        return pd.DataFrame()
-    if poll_interval_seconds <= 0:
-        poll_interval_seconds = 1.0
-
-    cg = CoinGeckoClient()
-    rule = _timeframe_to_rule(timeframe)
-
-    points: List[Dict[str, Any]] = []
-    end_time = time.time() + float(stream_seconds)
-
-    # Throttle: respect the client-side rate limiter too.
-    while time.time() < end_time:
-        try:
-            price_data = cg.get_price([symbol], include_market_cap=False, include_24h_vol=False, include_24h_change=False)
-            coin_id = cg.get_coin_id(symbol)
-            price = float(price_data.get(coin_id, {}).get("usd", 0.0))
-            if price > 0:
-                points.append({"timestamp": datetime.utcnow(), "price": price})
-        except Exception as e:
-            logger.warning("CoinGecko polling failed: %s", e)
-
-        time.sleep(float(poll_interval_seconds))
-
-    if not points:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(points)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("UTC").dt.tz_localize(None)
-    df = df.set_index("timestamp").sort_index()
-
-    ohlc = df["price"].resample(rule).ohlc()
-    ohlc["volume"] = 0.0
-    ohlc = ohlc.dropna(subset=["open", "high", "low", "close"]).sort_index()
-    ohlc = ohlc[~ohlc.index.duplicated(keep="last")]
-    return ohlc
 
 
 def _to_utc_naive_index(df: pd.DataFrame) -> pd.DataFrame:
@@ -249,6 +157,51 @@ def _replace_last_windows(
     meta["replaced_rows"] = int(replace_rows)
 
     return combined, meta
+
+
+def _feature_cache_path(
+    data_path: str,
+    symbol: str,
+    timeframe: str,
+    strategy_name: str,
+    sample_rows: int = 0,
+) -> Path:
+    """Build a stable on-disk cache path for generated feature CSVs.
+
+    Includes `sample_rows` in the cache key so truncated datasets produce separate caches.
+    """
+    source = Path(data_path)
+    raw_dir = source.parent
+    cache_key = f"{source.resolve()}|{symbol.upper()}|{timeframe}|{strategy_name}|sample_rows={int(sample_rows)}"
+    cache_hash = hashlib.sha1(cache_key.encode("utf-8")).hexdigest()[:12]
+    cache_name = f"features_{symbol.upper()}_{timeframe}_{strategy_name}_{cache_hash}.csv"
+    return raw_dir / cache_name
+
+
+def _load_cached_features(cache_path: Path) -> Optional[pd.DataFrame]:
+    """Load a cached feature CSV if it exists."""
+    if not cache_path.is_file():
+        return None
+
+    try:
+        cached = pd.read_csv(cache_path, parse_dates=[0], index_col=0)
+        if not isinstance(cached.index, pd.DatetimeIndex):
+            cached.index = pd.to_datetime(cached.index)
+        logger.info("Loaded cached feature CSV: %s", cache_path)
+        return cached
+    except Exception as e:
+        logger.warning("Failed to load cached features from %s: %s", cache_path, e)
+        return None
+
+
+def _save_feature_cache(features: pd.DataFrame, cache_path: Path) -> None:
+    """Persist generated features to a CSV file in the raw data folder."""
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        features.to_csv(cache_path)
+        logger.info("Saved generated features to: %s", cache_path)
+    except Exception as e:
+        logger.warning("Failed to save feature CSV to %s: %s", cache_path, e)
 
 
 def _optimizer_kwargs_for_method(
@@ -359,6 +312,7 @@ def run_hybrid_live_optimization(
     coingecko_days: int,
     stream_seconds: int = 20,
     stream_interval_seconds: float = 5.0,
+    sample_rows: int = 0,
     human_params_json: Optional[str] = None,
     human_params_file: Optional[str] = None,
 ) -> HybridRunArtifacts:
@@ -393,20 +347,15 @@ def run_hybrid_live_optimization(
     if timeframe != "1m":
         raw = resampler.resample(raw, timeframe)
 
-    # Fetch live + replace last windows
-    # Base source: CoinGecko market_chart (recent points up to near-now).
-    live = _fetch_live_ohlcv_from_coingecko(symbol=symbol, timeframe=timeframe, days=coingecko_days)
-    # Newest source: CoinGecko polling (approximates "live" by sampling current price).
-    polled = _fetch_live_ohlcv_from_coingecko_polling(
-        symbol=symbol,
-        timeframe=timeframe,
-        stream_seconds=stream_seconds,
-        poll_interval_seconds=stream_interval_seconds,
-    )
-    if not polled.empty:
-        live = pd.concat([_to_utc_naive_index(live), _to_utc_naive_index(polled)], axis=0)
-        live = live.sort_index()
-        live = live[~live.index.duplicated(keep="last")]
+    # Optionally use a truncated dataset (keep last N rows) to reduce memory/time
+    if sample_rows and sample_rows > 0:
+        if len(raw) > sample_rows:
+            logger.info("Truncating dataset to last %s rows (requested sample_rows=%s)", sample_rows, sample_rows)
+            raw = raw.iloc[-int(sample_rows):].copy()
+
+    # CoinGecko integration intentionally disabled for hybrid mode.
+    # Hybrid now runs purely on local historical data to avoid API-key/rate-limit issues.
+    live = pd.DataFrame()
     hybrid_raw, replace_meta = _replace_last_windows(
         historical_ohlcv=raw,
         live_ohlcv=live,
@@ -414,15 +363,30 @@ def run_hybrid_live_optimization(
         replace_windows=replace_windows,
     )
 
+    replace_meta["live_source"] = "disabled"
+    replace_meta["live_disabled_reason"] = "coingecko_removed_for_hybrid_mode"
+
     logger.info(
         "Hybrid window replace: %s",
         replace_meta,
     )
 
-    # Generate features
-    data_with_features = feature_engine.generate_features(hybrid_raw, drop_na=False)
-    data_with_features = data_with_features.ffill().bfill()
-    data_with_features = data_with_features.dropna(subset=["open", "high", "low", "close", "volume"])
+    # Generate or reuse features from a CSV cache in the raw data folder.
+    feature_cache_path = _feature_cache_path(data_path, symbol, timeframe, strategy_name, sample_rows=sample_rows)
+    data_with_features = _load_cached_features(feature_cache_path)
+
+    if data_with_features is None:
+        data_with_features = feature_engine.generate_features(hybrid_raw, drop_na=False)
+        data_with_features = data_with_features.ffill().bfill()
+        data_with_features = data_with_features.dropna(subset=["open", "high", "low", "close", "volume"])
+        _save_feature_cache(data_with_features, feature_cache_path)
+    else:
+        # Ensure the cached CSV is usable as-is for backtesting and optimization.
+        if not isinstance(data_with_features.index, pd.DatetimeIndex):
+            data_with_features.index = pd.to_datetime(data_with_features.index)
+        data_with_features = data_with_features.sort_index()
+        data_with_features = data_with_features.ffill().bfill()
+        data_with_features = data_with_features.dropna(subset=["open", "high", "low", "close", "volume"])
 
     if len(data_with_features) < 500:
         raise ValueError(

@@ -446,28 +446,52 @@ class VolumeIndicatorGenerator:
         
         # Volume MAs
         vol_ma = calculate_volume_ma(df['volume'], self.volume_ma_windows)
+        try:
+            vol_ma = vol_ma.astype('float32', copy=False)
+        except Exception:
+            vol_ma = vol_ma.apply(pd.to_numeric, errors='coerce').astype('float32')
         features = pd.concat([features, vol_ma], axis=1)
         
         # Volume spikes
         vol_spikes = calculate_volume_spikes(
             df['volume'], self.volume_spike_threshold
         )
+        try:
+            vol_spikes = vol_spikes.astype('float32', copy=False)
+        except Exception:
+            vol_spikes = vol_spikes.apply(pd.to_numeric, errors='coerce').astype('float32')
         features = pd.concat([features, vol_spikes], axis=1)
         
         # VWAP
         vwap = calculate_vwap(df, self.vwap_period)
+        try:
+            vwap = vwap.astype('float32', copy=False)
+        except Exception:
+            vwap = vwap.apply(pd.to_numeric, errors='coerce').astype('float32')
         features = pd.concat([features, vwap], axis=1)
         
         # OBV
         obv = calculate_obv(df)
+        try:
+            obv = obv.astype('float32', copy=False)
+        except Exception:
+            obv = obv.apply(pd.to_numeric, errors='coerce').astype('float32')
         features = pd.concat([features, obv], axis=1)
         
         # MFI
         mfi = calculate_mfi(df, self.mfi_period)
+        try:
+            mfi = mfi.astype('float32', copy=False)
+        except Exception:
+            mfi = mfi.apply(pd.to_numeric, errors='coerce').astype('float32')
         features = pd.concat([features, mfi], axis=1)
         
         # AD Line
         ad = calculate_ad_line(df)
+        try:
+            ad = ad.astype('float32', copy=False)
+        except Exception:
+            ad = ad.apply(pd.to_numeric, errors='coerce').astype('float32')
         features = pd.concat([features, ad], axis=1)
         
         # Volume Profile (computationally expensive, optional)

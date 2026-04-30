@@ -259,6 +259,26 @@ class FeatureEngine:
             f"{len(features)} rows"
         )
 
+        # Downcast numeric columns to reduce memory footprint (float64->float32, int64->int32)
+        try:
+            float_cols = features.select_dtypes(include=['float64']).columns
+            if len(float_cols) > 0:
+                features[float_cols] = features[float_cols].astype('float32', copy=False)
+
+            int_cols = features.select_dtypes(include=['int64']).columns
+            if len(int_cols) > 0:
+                features[int_cols] = features[int_cols].astype('int32', copy=False)
+        except Exception:
+            # Fall back to pandas' to_numeric downcast if direct astype fails
+            try:
+                for col in features.columns:
+                    if pd.api.types.is_float_dtype(features[col].dtype):
+                        features[col] = pd.to_numeric(features[col], downcast='float')
+                    elif pd.api.types.is_integer_dtype(features[col].dtype):
+                        features[col] = pd.to_numeric(features[col], downcast='integer')
+            except Exception:
+                logger.debug('Numeric downcast failed; returning original dtypes')
+
         return features
     
     def generate_incremental(

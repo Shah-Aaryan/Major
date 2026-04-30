@@ -47,6 +47,9 @@ from optimization.optimizer_registry import (
 
 logger = logging.getLogger(__name__)
 
+# Explainability
+from analysis.explainability import ParameterExplainer, format_report_as_json
+
 
 class OptimizationMethod(Enum):
     """Available optimization methods."""
@@ -94,6 +97,8 @@ class ParameterAdjustmentResult:
     market_condition: str = ""
     ml_helped: bool = False
     failure_reason: Optional[str] = None
+    # Explainability report JSON (generated after optimization)
+    explainability_report_json: Optional[str] = None
     
     def __post_init__(self):
         """Calculate derived fields."""
@@ -144,6 +149,8 @@ class ParameterAdjustmentResult:
             'market_condition': self.market_condition,
             'ml_helped': self.ml_helped,
             'failure_reason': self.failure_reason
+            ,
+            'explainability_report_json': self.explainability_report_json
         }
     
     def summary(self) -> str:
@@ -553,6 +560,24 @@ class MLParameterAdjuster:
         
         if self.verbose:
             logger.info(result.summary())
+
+        # Generate explainability report for this optimization and attach JSON
+        try:
+            explainer = ParameterExplainer()
+            explainer.log_optimization_result(
+                human_params=human_params,
+                ml_params=opt_result.best_parameters,
+                human_objective=human_objective,
+                ml_objective=opt_result.best_objective,
+                optimization_method=method_key,
+                market_condition=market_condition
+            )
+            report = explainer.generate_report(strategy_name)
+            report_json = format_report_as_json(report)
+            result.explainability_report_json = report_json
+            logger.info(f"Explainability report generated for {strategy_name}")
+        except Exception as e:
+            logger.warning(f"Failed to generate explainability report: {e}")
         
         return result
     
