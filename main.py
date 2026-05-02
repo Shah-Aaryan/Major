@@ -37,13 +37,35 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+
+class SafeStreamHandler(logging.StreamHandler):
+    """Stream handler that degrades unsupported characters instead of failing."""
+
+    def emit(self, record):
+        try:
+            super().emit(record)
+        except UnicodeEncodeError:
+            try:
+                msg = self.format(record)
+                stream = self.stream
+                encoding = getattr(stream, "encoding", None) or "utf-8"
+                safe_msg = msg.encode(encoding, errors="replace").decode(encoding, errors="replace")
+                stream.write(safe_msg + self.terminator)
+                self.flush()
+            except Exception:
+                self.handleError(record)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)s | %(name)s | %(message)s',
     handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(f'research_{datetime.now().strftime("%Y%m%d")}.log')
+        SafeStreamHandler(sys.stdout),
+        logging.FileHandler(
+            f'research_{datetime.now().strftime("%Y%m%d")}.log',
+            encoding='utf-8',
+            errors='replace',
+        )
     ]
 )
 

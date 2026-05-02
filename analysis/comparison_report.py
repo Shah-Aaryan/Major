@@ -158,6 +158,12 @@ class ComparisonReport:
     parameter_changes: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     most_impactful_params: List[str] = field(default_factory=list)
     
+    # Explainability report
+    explainability_report_json: Optional[str] = None
+    
+    # Strategy compatibility check
+    strategy_compatibility_report: Optional[str] = None
+    
     # Recommendations
     recommendations: List[str] = field(default_factory=list)
     should_use_ml: bool = False
@@ -184,6 +190,12 @@ class ComparisonReport:
         for i, finding in enumerate(self.key_findings, 1):
             md.append(f"{i}. {finding}")
         md.append("")
+        
+        # Strategy Compatibility Check
+        if self.strategy_compatibility_report:
+            md.append("## ⚠️ Strategy Compatibility Assessment")
+            md.append(self.strategy_compatibility_report)
+            md.append("")
         
         # Performance Comparison
         md.append("## Performance Comparison")
@@ -267,6 +279,59 @@ class ComparisonReport:
                     md.append(f"  - Reason: {reason}")
             md.append("")
         
+        # Explainability Report
+        if self.explainability_report_json:
+            try:
+                import json
+                exp_data = json.loads(self.explainability_report_json) if isinstance(self.explainability_report_json, str) else self.explainability_report_json
+                
+                md.append("## ML Parameter Optimization Explanation")
+                md.append("")
+                
+                # Parameter sensitivities
+                if 'sensitivities' in exp_data:
+                    md.append("### Parameter Sensitivity Analysis")
+                    sensitivities = exp_data['sensitivities']
+                    for param_name, sensitivity in list(sensitivities.items())[:5]:
+                        impact = sensitivity.get('directional_impact', 'neutral')
+                        stability = sensitivity.get('stability', 0)
+                        md.append(f"- **{param_name}**")
+                        md.append(f"  - Impact: {impact}")
+                        md.append(f"  - Stability: {stability:.1%}")
+                    md.append("")
+                
+                # Insights
+                if 'insights' in exp_data:
+                    insights = exp_data['insights']
+                    md.append("### Key Insights")
+                    if insights.get('most_impactful'):
+                        md.append(f"- **Most Impactful Parameter**: {insights['most_impactful']}")
+                    if insights.get('most_stable'):
+                        md.append(f"- **Most Stable Parameter**: {insights['most_stable']}")
+                    if insights.get('most_volatile'):
+                        md.append(f"- **Most Volatile Parameter**: {insights['most_volatile']}")
+                    md.append("")
+                
+                # Attribution
+                if 'attribution' in exp_data:
+                    attr = exp_data['attribution']
+                    md.append("### Performance Attribution")
+                    md.append(f"Total Improvement: {attr.get('total_improvement', 0):.4f}")
+                    if attr.get('by_parameter'):
+                        md.append("By Parameter:")
+                        for param, contrib in list(attr['by_parameter'].items())[:5]:
+                            md.append(f"- {param}: {contrib:.4f}")
+                    md.append("")
+                
+                # Warnings
+                if exp_data.get('warnings'):
+                    md.append("### Warnings")
+                    for warning in exp_data['warnings']:
+                        md.append(f"⚠ {warning}")
+                    md.append("")
+            except Exception as e:
+                logger.warning(f"Failed to format explainability report: {e}")
+        
         # Recommendations
         md.append("## Recommendations")
         md.append("")
@@ -303,6 +368,8 @@ class ComparisonReport:
             'best_method': self.best_method,
             'parameter_changes': self.parameter_changes,
             'most_impactful_params': self.most_impactful_params,
+            'explainability_report': self.explainability_report_json,
+            'strategy_compatibility_report': self.strategy_compatibility_report,
             'recommendations': self.recommendations,
             'should_use_ml': self.should_use_ml,
             'confidence': self.confidence
@@ -332,7 +399,9 @@ def generate_full_report(
     best_method_override: Optional[str] = None,
     human_params: Optional[Dict[str, Any]] = None,
     ml_params: Optional[Dict[str, Any]] = None,
-    data_period: str = ""
+    data_period: str = "",
+    explainability_report_json: Optional[str] = None,
+    strategy_compatibility_report: Optional[str] = None
 ) -> ComparisonReport:
     """
     Generate a comprehensive comparison report.
@@ -353,7 +422,9 @@ def generate_full_report(
     """
     report = ComparisonReport(
         strategy_name=strategy_name,
-        data_period=data_period
+        data_period=data_period,
+        explainability_report_json=explainability_report_json,
+        strategy_compatibility_report=strategy_compatibility_report
     )
     
     # Extract metrics

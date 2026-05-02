@@ -115,8 +115,9 @@ class WalkForwardResult:
             if train_sharpes and test_sharpes:
                 avg_train = np.mean(train_sharpes)
                 avg_test = np.mean(test_sharpes)
-                if avg_train > 0:
-                    self.overfitting_ratio = (avg_train - avg_test) / avg_train
+                # Bounded gap metric in [-1, 1] for stability/readability.
+                denom = abs(avg_train) + abs(avg_test) + 1e-9
+                self.overfitting_ratio = (avg_train - avg_test) / denom
     
     def summary(self) -> str:
         """Generate human-readable summary."""
@@ -277,12 +278,15 @@ class WalkForwardValidator:
                 baseline_equity_curves.append(baseline_result.equity_curve)
                 
                 # Calculate improvement
-                if baseline_result.metrics.sharpe_ratio != 0:
-                    window.ml_improvement = (
-                        (test_result.metrics.sharpe_ratio - 
-                         baseline_result.metrics.sharpe_ratio) /
-                        abs(baseline_result.metrics.sharpe_ratio)
-                    )
+                base_sharpe = float(getattr(baseline_result.metrics, "sharpe_ratio", 0.0) or 0.0)
+                test_sharpe = float(getattr(test_result.metrics, "sharpe_ratio", 0.0) or 0.0)
+
+                if abs(base_sharpe) > 1e-9:
+                    window.ml_improvement = (test_sharpe - base_sharpe) / abs(base_sharpe)
+                else:
+                    # When baseline Sharpe is 0 (often means no trades), represent improvement
+                    # as a bounded proxy from the ML Sharpe itself so it isn't stuck at 0.
+                    window.ml_improvement = float(np.tanh(test_sharpe / 2.0))
             
             window_results.append(window)
             

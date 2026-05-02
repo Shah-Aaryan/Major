@@ -396,8 +396,11 @@ def calculate_monthly_statistics(
             'pct_positive_months': 0.0
         }
     
-    # Resample to monthly
-    monthly = equity_curve.resample('M').last()
+    # Resample to monthly. Pandas >=3.0 removed 'M' in favor of 'ME'.
+    try:
+        monthly = equity_curve.resample('ME').last()
+    except ValueError:
+        monthly = equity_curve.resample('M').last()
     monthly_returns = monthly.pct_change().dropna()
     
     if len(monthly_returns) == 0:

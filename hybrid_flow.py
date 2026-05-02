@@ -342,6 +342,14 @@ def run_hybrid_live_optimization(
 
     # Load + preprocess
     raw = loader.load_csv(data_path)
+    data_stem = Path(data_path).stem.upper()
+    if symbol.upper() not in data_stem:
+        logger.warning(
+            "Symbol mismatch: requested symbol '%s' does not appear in data file '%s'. "
+            "Regime and compatibility results will reflect the loaded file, not the symbol name.",
+            symbol,
+            Path(data_path).name,
+        )
     raw, _quality = preprocessor.preprocess(raw, symbol=symbol)
 
     if timeframe != "1m":
@@ -399,6 +407,26 @@ def run_hybrid_live_optimization(
     overrides = _load_human_params(human_params_json, human_params_file)
     human_params = dict(base_human)
     human_params.update(overrides)
+    
+    # ⚠️ COMPATIBILITY CHECK: Detect market regime and check strategy suitability
+    from analysis.strategy_compatibility import early_warning_check
+    available_strategies = list(_STRATEGY_FACTORY.keys())
+    is_compatible, compat_message, best_alternative = early_warning_check(
+        data_with_features,
+        strategy_name,
+        available_strategies
+    )
+    
+    logger.warning(compat_message)
+    
+    if not is_compatible and best_alternative:
+        logger.warning(
+            "Suggested alternative strategy: '%s' (Score: %.0f%%)",
+            best_alternative.strategy_name,
+            best_alternative.compatibility_score * 100.0,
+        )
+        # You could add a config option to auto-switch or abort here
+        # For now, we continue with warning
 
     # Objective function for adjuster
     param_bounds = strategy.get_parameter_bounds()
@@ -408,7 +436,16 @@ def run_hybrid_live_optimization(
         strategy.update_parameters(params)
         engine = BacktestEngine(config=bt_config)
         result = engine.run(strategy, train_data)
-        return result.metrics.sharpe_ratio if result.metrics else 0.0
+        if result is None or result.metrics is None:
+            return -1.0
+
+        trades = len(result.trades) if getattr(result, "trades", None) else 0
+        if trades < 3:
+            # Avoid selecting parameter sets that produce no meaningful activity.
+            return -0.5
+
+        sharpe = float(getattr(result.metrics, "sharpe_ratio", 0.0) or 0.0)
+        return sharpe
 
     adjuster = MLParameterAdjuster(
         objective_function=objective_func,
@@ -431,6 +468,7 @@ def run_hybrid_live_optimization(
     best_method: Optional[str] = None
     best_score = float("-inf")
     best_params: Dict[str, Any] = human_params
+    best_explainability_report: Optional[str] = None
 
     # Walk-forward per method to choose best out-of-sample
     from backtesting.walk_forward import WalkForwardValidator
@@ -474,8 +512,10 @@ def run_hybrid_live_optimization(
                     continue
 
                 per_window_iters = base_per_window_iters
+                explainability_report = None
 
                 def optimize_func(train_df: pd.DataFrame) -> Dict[str, Any]:
+                    nonlocal explainability_report
                     extra_kwargs = _optimizer_kwargs_for_method(
                         method_key,
                         opt_config,
@@ -490,6 +530,9 @@ def run_hybrid_live_optimization(
                         n_iterations=per_window_iters,
                         **extra_kwargs,
                     )
+                    # Capture explainability report from first window
+                    if explainability_report is None and result.explainability_report_json:
+                        explainability_report = result.explainability_report_json
                     return result.ml_params or human_params
 
                 validator = WalkForwardValidator(
@@ -526,6 +569,8 @@ def run_hybrid_live_optimization(
                     best_score = score
                     best_method = method_key
                     best_params = final_params
+                    if explainability_report:
+                        best_explainability_report = explainability_report
 
             except Exception as e:
                 elapsed = time.time() - start
@@ -558,6 +603,8 @@ def run_hybrid_live_optimization(
         ml_params=best_params,
         data_period=data_period,
         best_method_override=best_method,
+        explainability_report_json=best_explainability_report,
+        strategy_compatibility_report=compat_message,
     )
 
     out_dir = Path(output_dir)
