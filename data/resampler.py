@@ -20,9 +20,9 @@ class TimeFrame(Enum):
     MINUTE_5 = "5min"
     MINUTE_15 = "15min"
     MINUTE_30 = "30min"
-    HOUR_1 = "1H"
-    HOUR_4 = "4H"
-    DAY_1 = "1D"
+    HOUR_1 = "1h"
+    HOUR_4 = "4h"
+    DAY_1 = "1d"
 
 
 # Mapping from user-friendly strings to pandas offset aliases
@@ -31,16 +31,16 @@ TIMEFRAME_MAP = {
     "5m": "5min",
     "15m": "15min",
     "30m": "30min",
-    "1h": "1H",
-    "4h": "4H",
-    "1d": "1D",
+    "1h": "1h",
+    "4h": "4h",
+    "1d": "1d",
     "1min": "1min",
     "5min": "5min",
     "15min": "15min",
     "30min": "30min",
-    "1H": "1H",
-    "4H": "4H",
-    "1D": "1D"
+    "1H": "1h",
+    "4H": "4h",
+    "1D": "1d"
 }
 
 

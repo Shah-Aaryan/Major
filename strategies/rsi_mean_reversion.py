@@ -43,6 +43,7 @@ class RSIMeanReversionParams(StrategyParameters):
     These parameters can be tuned by ML optimization.
     """
     # RSI-specific parameters
+    cooldown_period: int = 10             # Bars to wait between trades
     rsi_lookback: int = 14           # RSI calculation period
     rsi_buy_threshold: int = 30      # RSI level to buy (oversold)
     rsi_sell_threshold: int = 70     # RSI level to sell (overbought)
@@ -55,15 +56,21 @@ class RSIMeanReversionParams(StrategyParameters):
     avoid_trending_markets: bool = True  # Avoid signals in strong trends
     adx_threshold: float = 30.0          # ADX threshold for trending market
     
+    # Sentiment-aware biasing (Requested by user)
+    use_sentiment_bias: bool = True      # Bias signals towards major trend
+    sentiment_ema_period: int = 200      # Long-term trend EMA
+    sentiment_confidence_boost: float = 0.2  # Add confidence to trend-aligned signals
+    
     def get_bounds(self) -> Dict[str, Tuple[float, float]]:
         """Get parameter bounds including strategy-specific ones."""
         bounds = super().get_bounds()
         bounds.update({
-            'rsi_lookback': (5, 30),
-            'rsi_buy_threshold': (15, 40),
-            'rsi_sell_threshold': (60, 85),
-            'min_rsi_slope': (-5.0, 5.0),
-            'adx_threshold': (20.0, 50.0)
+            'rsi_lookback': (10, 40),        # Increased minimum to reduce noise
+            'rsi_buy_threshold': (15, 35),   # More conservative thresholds
+            'rsi_sell_threshold': (65, 85),
+            'min_rsi_slope': (0.0, 5.0),
+            'adx_threshold': (20.0, 40.0),   # Lowered to avoid "fake" range signals
+            'sentiment_ema_period': (100, 300)
         })
         return bounds
 
@@ -117,6 +124,41 @@ class RSIMeanReversionStrategy(BaseStrategy):
         # Strategy-specific state
         self.confirmation_counter = 0
         self.pending_signal_type: Optional[SignalType] = None
+        self._indicators_initialized = False
+
+    def update_parameters(self, params: Dict[str, Any]) -> None:
+        """Update strategy parameters and reset indicator initialization."""
+        super().update_parameters(params)
+        self._indicators_initialized = False
+
+    def _ensure_indicators(self, df: pd.DataFrame) -> None:
+        """Calculate required indicators if they are missing from the dataframe."""
+        # RSI
+        rsi_col = f'rsi_{self.params.rsi_lookback}'
+        if rsi_col not in df.columns:
+            delta = df['close'].diff()
+            gain = (delta.where(delta > 0, 0))
+            loss = (-delta.where(delta < 0, 0))
+            avg_gain = gain.ewm(alpha=1/self.params.rsi_lookback, adjust=False).mean()
+            avg_loss = loss.ewm(alpha=1/self.params.rsi_lookback, adjust=False).mean()
+            rs = avg_gain / avg_loss
+            df[rsi_col] = 100 - (100 / (1 + rs))
+            
+        # Sentiment EMA
+        if self.params.use_sentiment_bias:
+            # Using 200 EMA as fixed sentiment anchor
+            period = 200
+            col = f'ema_{period}'
+            if col not in df.columns:
+                df[col] = df['close'].ewm(span=period, adjust=False).mean()
+        
+        # Ensure ADX is present if needed
+        if self.params.avoid_trending_markets and 'adx' not in df.columns:
+             # Basic ADX calculation is complex, but we can at least ensure we don't crash
+             # For now, if missing, we'll just not filter.
+             pass
+                
+        self._indicators_initialized = True
     
     @property
     def params(self) -> RSIMeanReversionParams:
@@ -141,6 +183,9 @@ class RSIMeanReversionStrategy(BaseStrategy):
         Returns:
             StrategySignal indicating the trading action
         """
+        if not self._indicators_initialized:
+            self._ensure_indicators(df)
+            
         current_row = df.iloc[current_idx]
         current_time = df.index[current_idx]
         current_price = current_row['close']
@@ -177,14 +222,28 @@ class RSIMeanReversionStrategy(BaseStrategy):
                     f"Trending market (ADX={adx:.1f})"
                 )
         
+        # Apply Sentiment Biasing (Requested: Bearish -> Sell)
+        sentiment_is_bullish = True
+        if self.params.use_sentiment_bias:
+            ema_col = f'ema_{self.params.sentiment_ema_period}'
+            sentiment_ema = current_row.get(ema_col, None)
+            if sentiment_ema is not None and not pd.isna(sentiment_ema):
+                sentiment_is_bullish = current_price > sentiment_ema
+        
+        self.trend_direction = 1 if sentiment_is_bullish else -1
+        
         # === CORE STRATEGY LOGIC (FIXED) ===
         
         # Check for oversold condition (BUY signal)
         if current_rsi < self.params.rsi_buy_threshold:
-            # Check RSI slope filter
-            if rsi_momentum >= self.params.min_rsi_slope:
+            # Trend filter check (Requested: Bearish -> Sell)
+            if self.params.use_sentiment_bias and not sentiment_is_bullish:
+                return self._hold_signal(current_time, current_price, "Oversold but major trend is Bearish")
+            
+            # Check RSI slope filter (allow slightly negative to catch the turn)
+            if rsi_momentum >= -5.0:
                 # RSI is turning up from oversold - potential buy
-                return self._generate_entry_signal(
+                signal = self._generate_entry_signal(
                     current_time,
                     current_price,
                     SignalType.LONG,
@@ -193,13 +252,20 @@ class RSIMeanReversionStrategy(BaseStrategy):
                     df,
                     current_idx
                 )
+                if sentiment_is_bullish:
+                    signal.confidence = min(signal.confidence + self.params.sentiment_confidence_boost, 1.0)
+                return signal
         
         # Check for overbought condition (SELL/SHORT signal)
         elif current_rsi > self.params.rsi_sell_threshold:
+            # Trend filter check (optionally allow shorts in bull for reversion)
+            # if self.params.use_sentiment_bias and sentiment_is_bullish:
+            #     return self._hold_signal(current_time, current_price, "Overbought but major trend is Bullish")
+
             # Check RSI slope filter
             if rsi_momentum <= -self.params.min_rsi_slope:
                 # RSI is turning down from overbought - potential sell
-                return self._generate_entry_signal(
+                signal = self._generate_entry_signal(
                     current_time,
                     current_price,
                     SignalType.SHORT,
@@ -208,6 +274,9 @@ class RSIMeanReversionStrategy(BaseStrategy):
                     df,
                     current_idx
                 )
+                if not sentiment_is_bullish:
+                    signal.confidence = min(signal.confidence + self.params.sentiment_confidence_boost, 1.0)
+                return signal
         
         # No signal condition met
         return self._hold_signal(
@@ -299,7 +368,10 @@ class RSIMeanReversionStrategy(BaseStrategy):
             'use_divergence_filter': self.params.use_divergence_filter,
             'min_rsi_slope': self.params.min_rsi_slope,
             'avoid_trending_markets': self.params.avoid_trending_markets,
-            'adx_threshold': self.params.adx_threshold
+            'adx_threshold': self.params.adx_threshold,
+            'use_sentiment_bias': self.params.use_sentiment_bias,
+            'sentiment_ema_period': self.params.sentiment_ema_period,
+            'sentiment_confidence_boost': self.params.sentiment_confidence_boost
         }
     
     def set_strategy_specific_params(self, params: Dict[str, Any]) -> None:
@@ -318,6 +390,12 @@ class RSIMeanReversionStrategy(BaseStrategy):
             self.params.avoid_trending_markets = bool(params['avoid_trending_markets'])
         if 'adx_threshold' in params:
             self.params.adx_threshold = float(params['adx_threshold'])
+        if 'use_sentiment_bias' in params:
+            self.params.use_sentiment_bias = bool(params['use_sentiment_bias'])
+        if 'sentiment_ema_period' in params:
+            self.params.sentiment_ema_period = int(params['sentiment_ema_period'])
+        if 'sentiment_confidence_boost' in params:
+            self.params.sentiment_confidence_boost = float(params['sentiment_confidence_boost'])
     
     def get_parameter_bounds(self) -> Dict[str, Tuple[float, float]]:
         """Get bounds for all parameters."""

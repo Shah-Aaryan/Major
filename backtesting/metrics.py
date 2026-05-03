@@ -18,6 +18,18 @@ from scipy import stats
 logger = logging.getLogger(__name__)
 
 
+# Standard periods per year for different timeframes
+PERIODS_PER_YEAR = {
+    '1m': 252 * 24 * 60,    # 362,880
+    '5m': 252 * 24 * 12,    # 72,576
+    '15m': 252 * 24 * 4,     # 24,192
+    '30m': 252 * 24 * 2,     # 12,096
+    '1h': 252 * 24,          # 6,048
+    '4h': 252 * 6,           # 1,512
+    '1d': 252,               # 252
+}
+
+
 @dataclass
 class PerformanceMetrics:
     """
@@ -130,6 +142,8 @@ def calculate_annualized_return(
     years = periods / periods_per_year
     if years <= 0:
         return 0.0
+    if (1 + total_return) <= 0:
+        return -1.0
     return (1 + total_return) ** (1 / years) - 1
 
 

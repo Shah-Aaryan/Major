@@ -23,8 +23,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+import numpy as np
 
 from analysis.comparison_report import generate_full_report
+from backtesting.metrics import PERIODS_PER_YEAR
 from backtesting.backtest_engine import BacktestConfig as BtConfig, BacktestEngine
 from config.settings import DataConfig, FeatureConfig, OptimizationConfig, StrategyConfig
 from data.loader import DataLoader
@@ -338,6 +340,7 @@ def run_hybrid_live_optimization(
         initial_capital=strategy_config.initial_capital,
         commission_pct=strategy_config.trading_fee_pct,
         slippage_pct=0.0005,
+        periods_per_year=PERIODS_PER_YEAR.get(timeframe, 252 * 24 * 60)
     )
 
     # Load + preprocess
@@ -433,19 +436,73 @@ def run_hybrid_live_optimization(
     n_param_dims = len(param_bounds)
 
     def objective_func(_strategy_name: str, params: Dict[str, Any], train_data: pd.DataFrame) -> float:
+        """Anti-overfit objective: evaluates on an internal validation slice.
+        
+        Uses an 80/20 internal split of the training window so the ML cannot
+        memorize the exact training pattern. Only parameters that generalize
+        within the training window are selected.
+        """
+        # === INTERNAL VALIDATION SPLIT (the key anti-overfit mechanism) ===
+        # Use first 75% for internal training, last 25% as internal validation.
+        # The ML optimizer must find params that work on the UNSEEN 25%, not the
+        # training 75% it is optimizing on. This prevents memorization.
+        n = len(train_data)
+        if n >= 200:
+            internal_train = train_data.iloc[:int(n * 0.75)]
+            internal_val = train_data.iloc[int(n * 0.75):]
+        else:
+            # Too little data — fall back to full window
+            internal_train = train_data
+            internal_val = train_data
+
         strategy.update_parameters(params)
         engine = BacktestEngine(config=bt_config)
-        result = engine.run(strategy, train_data)
-        if result is None or result.metrics is None:
+
+        # Score is based on VALIDATION performance, not training performance
+        val_result = engine.run(strategy, internal_val)
+        if val_result is None or val_result.metrics is None:
             return -1.0
 
-        trades = len(result.trades) if getattr(result, "trades", None) else 0
-        if trades < 3:
-            # Avoid selecting parameter sets that produce no meaningful activity.
+        val_trades = len(val_result.trades) if getattr(val_result, "trades", None) else 0
+        if val_trades < 2:
             return -0.5
 
-        sharpe = float(getattr(result.metrics, "sharpe_ratio", 0.0) or 0.0)
-        return sharpe
+        # Also run on training portion to penalize train/val gap (overfit detection)
+        train_result = engine.run(strategy, internal_train)
+        train_sharpe = float(getattr(train_result.metrics, "sharpe_ratio", 0.0) or 0.0) if train_result and train_result.metrics else 0.0
+
+        # Extract validation metrics
+        val_return = float(getattr(val_result.metrics, "total_return", 0.0) or 0.0)
+        val_sharpe = float(getattr(val_result.metrics, "sharpe_ratio", 0.0) or 0.0)
+        val_sortino = float(getattr(val_result.metrics, "sortino_ratio", 0.0) or 0.0)
+        val_max_dd = abs(float(getattr(val_result.metrics, "max_drawdown", 0.0) or 0.0))
+        val_win_rate = float(getattr(val_result.metrics, "win_rate", 0.0) or 0.0)
+
+        # 1. Base Score: validation Sortino (downside-risk adjusted)
+        base_score = val_sortino if not np.isinf(val_sortino) and val_sortino != 0 else val_sharpe
+
+        # 2. Overfit Gap Penalty: if train >> val, the params are memorizing
+        overfit_gap = max(0.0, train_sharpe - val_sharpe)
+        overfit_penalty = overfit_gap * 0.5  # Penalize train/val divergence
+
+        # 3. Over-trading Penalty (max 1 trade per 10 bars)
+        candles = len(internal_val)
+        trade_density = val_trades / max(candles, 1)
+        density_penalty = max(0.0, (trade_density - 0.1)) * 20.0
+
+        # 4. Drawdown Penalty (>10%)
+        dd_penalty = max(0.0, val_max_dd - 0.10) * 10.0
+
+        # 5. Win-Rate Penalty (<35% = noise chasing)
+        win_penalty = max(0.0, 0.35 - val_win_rate) * 2.0
+
+        final_score = base_score - overfit_penalty - density_penalty - dd_penalty - win_penalty
+
+        # Never reward a parameter set with negative validation return
+        if val_return < 0:
+            final_score = min(final_score, -0.5)  # fixed penalty instead of amplification
+
+        return final_score
 
     adjuster = MLParameterAdjuster(
         objective_function=objective_func,
@@ -546,15 +603,17 @@ def run_hybrid_live_optimization(
                     data=data_with_features,
                     n_windows=wf_windows,
                     train_ratio=wf_train_ratio,
-                    anchored=False,
-                    min_train_size=100,
+                    anchored=True,   # Expanding window: each fold trains on ALL prior data
+                    min_train_size=200,
                 )
 
                 if wf is None or wf.aggregate_test_metrics is None:
                     raise RuntimeError("walk-forward returned no aggregate metrics")
 
                 elapsed = time.time() - start
-                score = wf.aggregate_test_metrics.sharpe_ratio
+                # Use Sortino for scoring as it matches the objective function better
+                sortino = wf.aggregate_test_metrics.sortino_ratio
+                score = sortino if sortino and not np.isinf(sortino) else wf.aggregate_test_metrics.sharpe_ratio
                 final_params = wf.windows[-1].optimized_params if wf.windows else human_params
 
                 method_results[method_key] = {

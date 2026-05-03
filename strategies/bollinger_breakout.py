@@ -49,28 +49,33 @@ class BollingerBreakoutParams(StrategyParameters):
     # Squeeze detection
     squeeze_lookback: int = 100       # Lookback for squeeze comparison
     squeeze_percentile: float = 20.0  # Band width percentile for squeeze
-    require_squeeze: bool = True      # Only trade after squeeze
-    min_squeeze_candles: int = 5      # Minimum candles in squeeze
+    require_squeeze: bool = False      # Allow breakout without prior squeeze
+    min_squeeze_candles: int = 3      # Lowered from 5
     
     # Breakout confirmation
     breakout_threshold_pct: float = 0.1  # Min % beyond band for breakout
     volume_confirmation: bool = True     # Require volume spike
-    volume_spike_mult: float = 1.5       # Volume must be this x average
+    volume_spike_mult: float = 1.2       # Lowered from 1.5
     
     # Mean reversion exit
     use_mean_reversion_exit: bool = True  # Exit when price returns to middle band
+    
+    # Sentiment-aware biasing (Requested by user)
+    use_sentiment_bias: bool = True      # Bias signals towards major trend
+    sentiment_ema_period: int = 200      # Long-term trend EMA
+    sentiment_confidence_boost: float = 0.2  # Add confidence to trend-aligned signals
     
     def get_bounds(self) -> Dict[str, Tuple[float, float]]:
         """Get parameter bounds including strategy-specific ones."""
         bounds = super().get_bounds()
         bounds.update({
-            'bb_period': (10, 50),
-            'bb_std_dev': (1.5, 3.0),
-            'squeeze_lookback': (50, 200),
-            'squeeze_percentile': (10.0, 40.0),
-            'min_squeeze_candles': (3, 15),
-            'breakout_threshold_pct': (0.05, 0.5),
-            'volume_spike_mult': (1.2, 3.0)
+            'bb_period': (20, 60),           # Increased minimum to reduce noise
+            'bb_std_dev': (2.0, 3.5),        # More conservative multiplier
+            'squeeze_lookback': (100, 300),
+            'squeeze_percentile': (10.0, 30.0),
+            'min_squeeze_candles': (2, 10),
+            'breakout_threshold_pct': (0.1, 0.8),
+            'volume_spike_mult': (1.1, 2.5)
         })
         return bounds
 
@@ -124,6 +129,32 @@ class BollingerBreakoutStrategy(BaseStrategy):
         # State tracking
         self.squeeze_count = 0
         self.was_in_squeeze = False
+        self._indicators_initialized = False
+
+    def update_parameters(self, params: Dict[str, Any]) -> None:
+        """Update strategy parameters and reset indicator initialization."""
+        super().update_parameters(params)
+        self._indicators_initialized = False
+
+    def _ensure_indicators(self, df: pd.DataFrame) -> None:
+        """Calculate required indicators if they are missing from the dataframe."""
+        # Bollinger Bands
+        period = self.params.bb_period
+        std_dev = self.params.bb_std_dev
+        
+        prefix = f'bb_' # Usually bb_upper, bb_lower, etc.
+        if f'bb_upper' not in df.columns:
+            ma = df['close'].rolling(window=period).mean()
+            std = df['close'].rolling(window=period).std()
+            df['bb_upper'] = ma + (std * std_dev)
+            df['bb_lower'] = ma - (std * std_dev)
+            df['bb_middle'] = ma
+            
+        # Band width (for squeeze)
+        if 'bb_width' not in df.columns:
+            df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
+            
+        self._indicators_initialized = True
     
     @property
     def params(self) -> BollingerBreakoutParams:
@@ -148,6 +179,9 @@ class BollingerBreakoutStrategy(BaseStrategy):
         Returns:
             StrategySignal indicating the trading action
         """
+        if not self._indicators_initialized:
+            self._ensure_indicators(df)
+            
         current_row = df.iloc[current_idx]
         current_time = df.index[current_idx]
         current_price = current_row['close']
@@ -183,6 +217,15 @@ class BollingerBreakoutStrategy(BaseStrategy):
         previous_squeeze = self.was_in_squeeze
         self.was_in_squeeze = is_in_squeeze
         
+        # === SENTIMENT BIASING (Requested: Bearish -> Sell) ===
+        sentiment_is_bullish = True
+        if self.params.use_sentiment_bias:
+            # We need to calculate EMA 200 for sentiment
+            # EMA 200 is available in feature_engine
+            sentiment_ema = current_row.get(f'ema_{self.params.sentiment_ema_period}', None)
+            if sentiment_ema is not None and not pd.isna(sentiment_ema):
+                sentiment_is_bullish = current_price > sentiment_ema
+        
         # === CORE STRATEGY LOGIC (FIXED) ===
         
         # Check for breakout conditions
@@ -204,9 +247,16 @@ class BollingerBreakoutStrategy(BaseStrategy):
         if self.params.volume_confirmation:
             volume_confirmed = volume > volume_ma * self.params.volume_spike_mult
         
+        # Apply Sentiment Bias: Prioritize signals that match the major trend
+        if self.params.use_sentiment_bias:
+            if not sentiment_is_bullish and breakout_upper:
+                return self._hold_signal(current_time, current_price, "Bullish breakout against Bearish major trend")
+            if sentiment_is_bullish and breakout_lower:
+                return self._hold_signal(current_time, current_price, "Bearish breakout against Bullish major trend")
+        
         # Generate signals
         if breakout_upper and volume_confirmed:
-            return self._generate_entry_signal(
+            signal = self._generate_entry_signal(
                 current_time,
                 current_price,
                 SignalType.LONG,
@@ -216,9 +266,12 @@ class BollingerBreakoutStrategy(BaseStrategy):
                 bb_width,
                 volume / volume_ma if volume_ma > 0 else 1.0
             )
+            if sentiment_is_bullish:
+                signal.confidence = min(signal.confidence + self.params.sentiment_confidence_boost, 1.0)
+            return signal
         
         if breakout_lower and volume_confirmed:
-            return self._generate_entry_signal(
+            signal = self._generate_entry_signal(
                 current_time,
                 current_price,
                 SignalType.SHORT,
@@ -228,6 +281,9 @@ class BollingerBreakoutStrategy(BaseStrategy):
                 bb_width,
                 volume / volume_ma if volume_ma > 0 else 1.0
             )
+            if not sentiment_is_bullish:
+                signal.confidence = min(signal.confidence + self.params.sentiment_confidence_boost, 1.0)
+            return signal
         
         # Check for volume failure
         if (breakout_upper or breakout_lower) and not volume_confirmed:
@@ -349,7 +405,10 @@ class BollingerBreakoutStrategy(BaseStrategy):
             'breakout_threshold_pct': self.params.breakout_threshold_pct,
             'volume_confirmation': self.params.volume_confirmation,
             'volume_spike_mult': self.params.volume_spike_mult,
-            'use_mean_reversion_exit': self.params.use_mean_reversion_exit
+            'use_mean_reversion_exit': self.params.use_mean_reversion_exit,
+            'use_sentiment_bias': self.params.use_sentiment_bias,
+            'sentiment_ema_period': self.params.sentiment_ema_period,
+            'sentiment_confidence_boost': self.params.sentiment_confidence_boost
         }
     
     def set_strategy_specific_params(self, params: Dict[str, Any]) -> None:
@@ -374,6 +433,12 @@ class BollingerBreakoutStrategy(BaseStrategy):
             self.params.volume_spike_mult = float(params['volume_spike_mult'])
         if 'use_mean_reversion_exit' in params:
             self.params.use_mean_reversion_exit = bool(params['use_mean_reversion_exit'])
+        if 'use_sentiment_bias' in params:
+            self.params.use_sentiment_bias = bool(params['use_sentiment_bias'])
+        if 'sentiment_ema_period' in params:
+            self.params.sentiment_ema_period = int(params['sentiment_ema_period'])
+        if 'sentiment_confidence_boost' in params:
+            self.params.sentiment_confidence_boost = float(params['sentiment_confidence_boost'])
     
     def get_parameter_bounds(self) -> Dict[str, Tuple[float, float]]:
         """Get bounds for all parameters."""

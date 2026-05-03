@@ -36,7 +36,7 @@ class FeatureConfig:
     
     # Trend features
     sma_windows: List[int] = field(default_factory=lambda: [5, 10, 20, 50, 100, 200])
-    ema_windows: List[int] = field(default_factory=lambda: [5, 10, 20, 50, 100])
+    ema_windows: List[int] = field(default_factory=lambda: [5, 10, 20, 50, 100, 200])
     adx_period: int = 14
     
     # Momentum features

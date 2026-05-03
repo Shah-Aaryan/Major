@@ -73,11 +73,12 @@ class BacktestConfig:
     max_positions: int = 1
     
     # Risk management
-    stop_loss_pct: Optional[float] = None  # e.g., 0.02 for 2%
+    stop_loss_pct: Optional[float] = 0.05  # Default 5% stop loss to prevent bankruptcy
     take_profit_pct: Optional[float] = None  # e.g., 0.05 for 5%
     
     # Execution
     use_next_bar_open: bool = True  # Execute at next bar's open
+    periods_per_year: int = 252 * 24 * 60  # Default to 1-minute
 
 
 @dataclass
@@ -224,17 +225,34 @@ class BacktestEngine:
         )
         
         # Main backtest loop
-        for idx in range(len(data)):
-            current_bar = data.iloc[idx]
-            timestamp = data.index[idx]
+        # Optimization: Pre-extract indices and common values
+        data_len = len(data)
+        close_prices = data['close'].values
+        timestamps = data.index
+        
+        for idx in range(data_len):
+            current_price = close_prices[idx]
+            timestamp = timestamps[idx]
             
             # Update equity
-            equity = self._calculate_equity(current_bar['close'])
+            equity = self._calculate_equity(current_price)
             self.equity_history.append((timestamp, equity))
+
+            # Liquidation check (Bankruptcy)
+            if equity <= (self.config.initial_capital * 0.05):
+                logger.warning(f"CRITICAL: Portfolio liquidated at {timestamp} (Equity: {equity:.2f})")
+                if self.position is not None:
+                    self._close_position(current_bar['close'], timestamp, "liquidation")
+                # Fill remaining history with bankruptcy equity
+                for remaining_idx in range(idx + 1, len(data)):
+                    self.equity_history.append((data.index[remaining_idx], equity))
+                break
             
             # Check stop loss / take profit
             if self.position is not None:
-                self._check_exit_conditions(current_bar, timestamp)
+                # Still need current_bar for some exit conditions, but it's only once per iteration with position
+                current_bar = data.iloc[idx]
+                self._check_exit_conditions(current_bar, timestamp, strategy=strategy)
             
             # Generate signal
             signal = strategy.generate_signal(data, idx)
@@ -248,7 +266,7 @@ class BacktestEngine:
             })
             
             # Process signal
-            self._process_signal(signal, current_bar, timestamp)
+            self._process_signal(signal, data, idx)
         
         # Close any remaining position
         if self.position is not None:
@@ -273,7 +291,8 @@ class BacktestEngine:
         metrics = calculate_all_metrics(
             equity_curve=equity_curve,
             trade_returns=trade_returns,
-            trade_durations=trade_durations
+            trade_durations=trade_durations,
+            periods_per_year=self.config.periods_per_year
         )
         
         # Build result
@@ -299,34 +318,40 @@ class BacktestEngine:
         if self.position is None:
             return self.capital
         
-        position_value = self.position['quantity'] * current_price
+        # Principal that was locked when opening the position
+        locked_principal = self.position['quantity'] * self.position['entry_price']
         
         if self.position['side'] == 'long':
-            unrealized_pnl = position_value - (
-                self.position['quantity'] * self.position['entry_price']
-            )
+            unrealized_pnl = (self.position['quantity'] * current_price) - locked_principal
         else:  # short
-            unrealized_pnl = (
-                self.position['quantity'] * self.position['entry_price']
-            ) - position_value
-        
-        return self.capital + unrealized_pnl
+            unrealized_pnl = locked_principal - (self.position['quantity'] * current_price)
+            
+        # Total equity = Remaining cash + the principal we "invested" + the PnL gained/lost
+        return self.capital + locked_principal + unrealized_pnl
     
     def _process_signal(
         self,
         signal: StrategySignal,
-        bar: pd.Series,
-        timestamp: datetime
+        data: pd.DataFrame,
+        idx: int
     ) -> None:
         """Process a trading signal."""
         if signal.signal_type == SignalType.HOLD:
             return
         
-        # Determine execution price (next bar open or current close)
-        if self.config.use_next_bar_open:
-            exec_price = bar['close']  # Simplified: use close
+        bar = data.iloc[idx]
+        timestamp = data.index[idx]
+
+        # Determine execution price
+        if self.config.use_next_bar_open and idx < len(data) - 1:
+            # Execute at NEXT bar's open
+            exec_bar = data.iloc[idx + 1]
+            exec_price = exec_bar['open']
+            exec_timestamp = data.index[idx + 1]
         else:
+            # Execute at CURRENT bar's close (fallback or same-bar)
             exec_price = bar['close']
+            exec_timestamp = timestamp
         
         # Apply slippage
         slippage = exec_price * self.config.slippage_pct
@@ -335,31 +360,31 @@ class BacktestEngine:
             if self.position is not None:
                 if self.position['side'] == 'short':
                     # Close short position
-                    self._close_position(exec_price - slippage, timestamp, "reverse_signal")
+                    self._close_position(exec_price - slippage, exec_timestamp, "reverse_signal")
                 else:
                     # Already long, do nothing
                     return
             
             # Open long position
-            self._open_position('long', exec_price + slippage, timestamp, signal)
+            self._open_position('long', exec_price + slippage, exec_timestamp, signal)
         
         elif signal.signal_type == SignalType.SHORT:
             if not self.config.allow_shorting:
                 if self.position is not None and self.position['side'] == 'long':
                     # Close long position
-                    self._close_position(exec_price - slippage, timestamp, "exit_signal")
+                    self._close_position(exec_price - slippage, exec_timestamp, "exit_signal")
                 return
             
             if self.position is not None:
                 if self.position['side'] == 'long':
                     # Close long position
-                    self._close_position(exec_price - slippage, timestamp, "reverse_signal")
+                    self._close_position(exec_price - slippage, exec_timestamp, "reverse_signal")
                 else:
                     # Already short, do nothing
                     return
             
             # Open short position
-            self._open_position('short', exec_price - slippage, timestamp, signal)
+            self._open_position('short', exec_price - slippage, exec_timestamp, signal)
     
     def _open_position(
         self,
@@ -459,7 +484,8 @@ class BacktestEngine:
     def _check_exit_conditions(
         self,
         bar: pd.Series,
-        timestamp: datetime
+        timestamp: datetime,
+        strategy: Optional[BaseStrategy] = None
     ) -> None:
         """Check stop loss and take profit conditions."""
         if self.position is None:
@@ -467,35 +493,48 @@ class BacktestEngine:
         
         high = bar['high']
         low = bar['low']
-        
         entry_price = self.position['entry_price']
         
+        # Use strategy parameters if available, else fallback to config
+        sl_pct = self.config.stop_loss_pct
+        tp_pct = self.config.take_profit_pct
+        
+        if strategy and hasattr(strategy, 'parameters'):
+            # Some strategies use 2.0 for 2%, some use 0.02. Normalize to 0.02.
+            s_sl = getattr(strategy.parameters, 'stop_loss_pct', None)
+            if s_sl is not None:
+                sl_pct = s_sl / 100.0 if s_sl > 0.5 else s_sl
+                
+            s_tp = getattr(strategy.parameters, 'take_profit_pct', None)
+            if s_tp is not None:
+                tp_pct = s_tp / 100.0 if s_tp > 0.5 else s_tp
+
         if self.position['side'] == 'long':
             # Stop loss
-            if self.config.stop_loss_pct is not None:
-                stop_price = entry_price * (1 - self.config.stop_loss_pct)
+            if sl_pct is not None:
+                stop_price = entry_price * (1 - sl_pct)
                 if low <= stop_price:
                     self._close_position(stop_price, timestamp, "stop_loss")
                     return
             
             # Take profit
-            if self.config.take_profit_pct is not None:
-                tp_price = entry_price * (1 + self.config.take_profit_pct)
+            if tp_pct is not None:
+                tp_price = entry_price * (1 + tp_pct)
                 if high >= tp_price:
                     self._close_position(tp_price, timestamp, "take_profit")
                     return
         
         else:  # short
             # Stop loss
-            if self.config.stop_loss_pct is not None:
-                stop_price = entry_price * (1 + self.config.stop_loss_pct)
+            if sl_pct is not None:
+                stop_price = entry_price * (1 + sl_pct)
                 if high >= stop_price:
                     self._close_position(stop_price, timestamp, "stop_loss")
                     return
             
             # Take profit
-            if self.config.take_profit_pct is not None:
-                tp_price = entry_price * (1 - self.config.take_profit_pct)
+            if tp_pct is not None:
+                tp_price = entry_price * (1 - tp_pct)
                 if low <= tp_price:
                     self._close_position(tp_price, timestamp, "take_profit")
                     return

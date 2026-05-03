@@ -58,14 +58,19 @@ class EMACrossoverParams(StrategyParameters):
     use_ema_slope_filter: bool = True    # Check if EMAs are sloping in signal direction
     min_ema_slope: float = 0.0001        # Minimum EMA slope
     
+    # Sentiment-aware biasing (Requested by user)
+    use_sentiment_bias: bool = True      # Bias signals towards major trend
+    sentiment_ema_period: int = 200      # Long-term trend EMA
+    sentiment_confidence_boost: float = 0.2  # Add confidence to trend-aligned signals
+    
     def get_bounds(self) -> Dict[str, Tuple[float, float]]:
         """Get parameter bounds including strategy-specific ones."""
         bounds = super().get_bounds()
         bounds.update({
-            'ema_fast_period': (3, 20),
-            'ema_slow_period': (15, 100),
+            'ema_fast_period': (8, 20),      # Tightened to reduce noise
+            'ema_slow_period': (30, 100),    # Optimized range
             'min_adx': (15.0, 40.0),
-            'crossover_threshold_pct': (0.01, 0.5),
+            'crossover_threshold_pct': (0.05, 0.5), # Prevent micro-crossovers
             'min_ema_slope': (0.00001, 0.001)
         })
         return bounds
@@ -119,6 +124,21 @@ class EMACrossoverStrategy(BaseStrategy):
         
         # Track previous crossover state
         self.was_fast_above_slow: Optional[bool] = None
+        self._indicators_initialized = False
+
+    def update_parameters(self, params: Dict[str, Any]) -> None:
+        """Update strategy parameters and reset indicator initialization."""
+        super().update_parameters(params)
+        self._indicators_initialized = False
+
+    def _ensure_indicators(self, df: pd.DataFrame) -> None:
+        """Calculate required EMAs if they are missing from the dataframe."""
+        for period in [self.params.ema_fast_period, self.params.ema_slow_period, self.params.sentiment_ema_period]:
+            col = f'ema_{period}'
+            if col not in df.columns:
+                # logger.info(f"Calculating missing indicator: {col}")
+                df[col] = df['close'].ewm(span=period, adjust=False).mean()
+        self._indicators_initialized = True
     
     @property
     def params(self) -> EMACrossoverParams:
@@ -143,6 +163,9 @@ class EMACrossoverStrategy(BaseStrategy):
         Returns:
             StrategySignal indicating the trading action
         """
+        if not self._indicators_initialized:
+            self._ensure_indicators(df)
+
         current_row = df.iloc[current_idx]
         current_time = df.index[current_idx]
         current_price = current_row['close']
@@ -170,8 +193,9 @@ class EMACrossoverStrategy(BaseStrategy):
         fast_ema_slope = 0
         slow_ema_slope = 0
         if current_idx >= 5:
-            prev_fast = self._get_ema_value(df, current_idx - 5, self.params.ema_fast_period)
-            prev_slow = self._get_ema_value(df, current_idx - 5, self.params.ema_slow_period)
+            prev_idx = max(0, current_idx - 5)
+            prev_fast = self._get_ema_value(df, prev_idx, self.params.ema_fast_period)
+            prev_slow = self._get_ema_value(df, prev_idx, self.params.ema_slow_period)
             if prev_fast is not None and prev_slow is not None:
                 fast_ema_slope = (fast_ema - prev_fast) / prev_fast
                 slow_ema_slope = (slow_ema - prev_slow) / prev_slow
@@ -185,6 +209,13 @@ class EMACrossoverStrategy(BaseStrategy):
                     current_time, current_price,
                     f"Weak trend (ADX={adx:.1f} < {self.params.min_adx})"
                 )
+        
+        # === SENTIMENT BIASING (Requested: Bearish -> Sell) ===
+        sentiment_is_bullish = True
+        if self.params.use_sentiment_bias:
+            sentiment_ema = self._get_ema_value(df, current_idx, self.params.sentiment_ema_period)
+            if sentiment_ema is not None:
+                sentiment_is_bullish = current_price > sentiment_ema
         
         # === CORE STRATEGY LOGIC (FIXED) ===
         
@@ -244,9 +275,18 @@ class EMACrossoverStrategy(BaseStrategy):
                         "Bearish crossover not confirmed by MACD"
                     )
         
+        # Apply Sentiment Bias: Prioritize signals that match the major trend
+        if self.params.use_sentiment_bias:
+            # Bearish -> Discard Bullish signals (don't buy in bear market)
+            if not sentiment_is_bullish and crossover_bullish:
+                return self._hold_signal(current_time, current_price, "Bullish crossover against Bearish major trend")
+            # Bullish -> Discard Bearish signals (optionally allow for exits, but keep conservative for now)
+            # if sentiment_is_bullish and crossover_bearish:
+            #     return self._hold_signal(current_time, current_price, "Bearish crossover against Bullish major trend")
+
         # Generate signal
         if crossover_bullish:
-            return self._generate_entry_signal(
+            signal = self._generate_entry_signal(
                 current_time,
                 current_price,
                 SignalType.LONG,
@@ -255,9 +295,13 @@ class EMACrossoverStrategy(BaseStrategy):
                 fast_ema_slope,
                 ema_diff_pct
             )
+            # Add boost if aligned with sentiment (though filtered above, adding for weight)
+            if sentiment_is_bullish:
+                signal.confidence = min(signal.confidence + self.params.sentiment_confidence_boost, 1.0)
+            return signal
         
         if crossover_bearish:
-            return self._generate_entry_signal(
+            signal = self._generate_entry_signal(
                 current_time,
                 current_price,
                 SignalType.SHORT,
@@ -266,6 +310,10 @@ class EMACrossoverStrategy(BaseStrategy):
                 fast_ema_slope,
                 ema_diff_pct
             )
+            # Add boost if aligned with sentiment
+            if not sentiment_is_bullish:
+                signal.confidence = min(signal.confidence + self.params.sentiment_confidence_boost, 1.0)
+            return signal
         
         # No crossover
         return self._hold_signal(
@@ -377,7 +425,10 @@ class EMACrossoverStrategy(BaseStrategy):
             'crossover_threshold_pct': self.params.crossover_threshold_pct,
             'require_price_above_ema': self.params.require_price_above_ema,
             'use_ema_slope_filter': self.params.use_ema_slope_filter,
-            'min_ema_slope': self.params.min_ema_slope
+            'min_ema_slope': self.params.min_ema_slope,
+            'use_sentiment_bias': self.params.use_sentiment_bias,
+            'sentiment_ema_period': self.params.sentiment_ema_period,
+            'sentiment_confidence_boost': self.params.sentiment_confidence_boost
         }
     
     def set_strategy_specific_params(self, params: Dict[str, Any]) -> None:
@@ -403,6 +454,12 @@ class EMACrossoverStrategy(BaseStrategy):
             self.params.use_ema_slope_filter = bool(params['use_ema_slope_filter'])
         if 'min_ema_slope' in params:
             self.params.min_ema_slope = float(params['min_ema_slope'])
+        if 'use_sentiment_bias' in params:
+            self.params.use_sentiment_bias = bool(params['use_sentiment_bias'])
+        if 'sentiment_ema_period' in params:
+            self.params.sentiment_ema_period = int(params['sentiment_ema_period'])
+        if 'sentiment_confidence_boost' in params:
+            self.params.sentiment_confidence_boost = float(params['sentiment_confidence_boost'])
     
     def get_parameter_bounds(self) -> Dict[str, Tuple[float, float]]:
         """Get bounds for all parameters."""
