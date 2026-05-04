@@ -510,16 +510,16 @@ def run_hybrid_live_optimization(
         verbose=False,
     )
 
-    # Optimizer methods (skip known-incompatible multi-objective wrappers)
+    # Optimizer methods
     implemented = [spec for spec in get_optimizer_registry(status="implemented")]
-    # Skip multi-objective wrappers for this single-objective hybrid flow.
-    # Also skip known-broken optimizer(s) so the sweep can complete.
-    method_keys = [
-        spec.key
-        for spec in implemented
-        if spec.key not in {"nsga_ii", "nsga_iii", "cma_es"}
-    ]
 
+    # This hybrid flow is single-objective (returns one scalar score), so true
+    # multi-objective optimizers are not comparable here.
+    excluded = {"nsga_ii", "nsga_iii"}
+    method_keys = [spec.key for spec in implemented if spec.key not in excluded]
+
+    # Record per-method outcomes so the final report/JSON shows what ran.
+    # status: success | skipped | failed
     method_results: Dict[str, Dict[str, Any]] = {}
 
     best_method: Optional[str] = None
@@ -554,6 +554,10 @@ def run_hybrid_live_optimization(
                             n_param_dims,
                             max_points,
                         )
+                        method_results[method_key] = {
+                            "status": "skipped",
+                            "reason": f"grid_search_estimated_combinations_exceeds_cap (est={est_points}, cap={max_points})",
+                        }
                         continue
                 # Respect overall budget: split trials across windows.
                 # Example: n_trials=20, wf_windows=5 -> 4 iterations per window.
@@ -566,6 +570,10 @@ def run_hybrid_live_optimization(
                         base_per_window_iters,
                         min_required,
                     )
+                    method_results[method_key] = {
+                        "status": "skipped",
+                        "reason": f"insufficient_budget_per_window (iters={base_per_window_iters}, required={min_required})",
+                    }
                     continue
 
                 per_window_iters = base_per_window_iters
@@ -617,9 +625,13 @@ def run_hybrid_live_optimization(
                 final_params = wf.windows[-1].optimized_params if wf.windows else human_params
 
                 method_results[method_key] = {
+                    "status": "success",
                     "mean_improvement_pct": float(wf.avg_ml_improvement * 100.0),
                     "ml_helped_rate": float(wf.ml_consistency),
                     "mean_time_seconds": float(elapsed),
+                    "score": float(score),
+                    "score_metric": "sortino_ratio" if sortino and not np.isinf(sortino) else "sharpe_ratio",
+                    # Keep old key for backward compatibility with any downstream consumers.
                     "score_sharpe": float(score),
                     "final_params": final_params,
                 }
@@ -634,11 +646,46 @@ def run_hybrid_live_optimization(
             except Exception as e:
                 elapsed = time.time() - start
                 logger.warning("Method %s failed after %.1fs: %s", method_key, elapsed, e)
+                method_results[method_key] = {
+                    "status": "failed",
+                    "mean_time_seconds": float(elapsed),
+                    "error": str(e),
+                }
     finally:
         bt_logger.setLevel(prev_bt_level)
 
     if best_method is None:
         raise RuntimeError("All optimization methods failed; cannot produce hybrid result")
+
+    # Console summary so it's obvious that multiple optimizers were attempted.
+    try:
+        print("\n" + "=" * 60)
+        print("OPTIMIZER COMPARISON (HYBRID MODE)")
+        print("=" * 60)
+        print("Method | Status | Score | ML Helped Rate | Time")
+        print("-" * 60)
+        for k in method_keys:
+            r = method_results.get(k, {"status": "unknown"})
+            status = r.get("status", "unknown")
+            score_val = r.get("score")
+            score_metric = r.get("score_metric")
+            score_str = ""
+            if isinstance(score_val, (int, float)) and score_metric:
+                score_str = f"{score_val:.4f} ({score_metric})"
+            elif isinstance(score_val, (int, float)):
+                score_str = f"{score_val:.4f}"
+
+            helped_rate = r.get("ml_helped_rate")
+            helped_str = f"{helped_rate:.0%}" if isinstance(helped_rate, (int, float)) else "-"
+            t = r.get("mean_time_seconds")
+            t_str = f"{t:.1f}s" if isinstance(t, (int, float)) else "-"
+            print(f"{k} | {status} | {score_str or '-'} | {helped_str} | {t_str}")
+
+        print("-" * 60)
+        print(f"Best method: {best_method}")
+        print("=" * 60 + "\n")
+    except Exception as e:
+        logger.warning("Failed to print optimizer comparison summary: %s", e)
 
     # Full backtests for reporting
     human_results = _run_backtest(strategy, data_with_features, human_params, bt_config)
@@ -652,9 +699,14 @@ def run_hybrid_live_optimization(
         ml_results=ml_results,
         method_comparison={
             k: {
+                "status": v.get("status", "unknown"),
                 "mean_improvement_pct": v.get("mean_improvement_pct", 0.0),
                 "ml_helped_rate": v.get("ml_helped_rate", 0.0),
                 "mean_time_seconds": v.get("mean_time_seconds", 0.0),
+                "score": v.get("score", None),
+                "score_metric": v.get("score_metric", None),
+                "reason": v.get("reason", None),
+                "error": v.get("error", None),
             }
             for k, v in method_results.items()
         },
@@ -692,8 +744,9 @@ def run_hybrid_live_optimization(
         "best_score_sharpe": best_score,
         "ml_params": best_params,
         "method_results": {
-            k: {kk: vv for kk, vv in v.items() if kk != "final_params"}
-            for k, v in method_results.items()
+            # Keep full per-method output (including final_params) so you can compare
+            # methods and reproduce the best parameters per optimizer.
+            k: v for k, v in method_results.items()
         },
     }
 

@@ -242,14 +242,46 @@ class ComparisonReport:
         if self.method_comparison:
             md.append("## Optimization Method Comparison")
             md.append("")
-            md.append("| Method | Avg Improvement | ML Helped Rate | Avg Time |")
-            md.append("|--------|-----------------|----------------|----------|")
+            # Allow richer tables when hybrid mode provides extra fields.
+            any_status = any(isinstance(v, dict) and 'status' in v for v in self.method_comparison.values())
+            any_score = any(isinstance(v, dict) and ('score' in v or 'score_sharpe' in v) for v in self.method_comparison.values())
+
+            if any_status and any_score:
+                md.append("| Method | Status | Score | Avg Improvement | ML Helped Rate | Avg Time |")
+                md.append("|--------|--------|-------|-----------------|----------------|----------|")
+            elif any_status:
+                md.append("| Method | Status | Avg Improvement | ML Helped Rate | Avg Time |")
+                md.append("|--------|--------|-----------------|----------------|----------|")
+            elif any_score:
+                md.append("| Method | Score | Avg Improvement | ML Helped Rate | Avg Time |")
+                md.append("|--------|-------|-----------------|----------------|----------|")
+            else:
+                md.append("| Method | Avg Improvement | ML Helped Rate | Avg Time |")
+                md.append("|--------|-----------------|----------------|----------|")
             
             for method, stats in self.method_comparison.items():
                 imp = stats.get('mean_improvement_pct', 0)
                 rate = stats.get('ml_helped_rate', 0)
                 time = stats.get('mean_time_seconds', 0)
-                md.append(f"| {method} | {imp:.2f}% | {rate:.1%} | {time:.1f}s |")
+
+                status = stats.get('status') if any_status else None
+                score_val = stats.get('score', stats.get('score_sharpe')) if any_score else None
+                score_metric = stats.get('score_metric')
+                if isinstance(score_val, (int, float)) and score_metric:
+                    score_str = f"{score_val:.4f} ({score_metric})"
+                elif isinstance(score_val, (int, float)):
+                    score_str = f"{score_val:.4f}"
+                else:
+                    score_str = ""
+
+                if any_status and any_score:
+                    md.append(f"| {method} | {status or ''} | {score_str} | {imp:.2f}% | {rate:.1%} | {time:.1f}s |")
+                elif any_status:
+                    md.append(f"| {method} | {status or ''} | {imp:.2f}% | {rate:.1%} | {time:.1f}s |")
+                elif any_score:
+                    md.append(f"| {method} | {score_str} | {imp:.2f}% | {rate:.1%} | {time:.1f}s |")
+                else:
+                    md.append(f"| {method} | {imp:.2f}% | {rate:.1%} | {time:.1f}s |")
             md.append("")
             md.append(f"**Best Method:** {self.best_method}")
             md.append("")
@@ -378,10 +410,10 @@ class ComparisonReport:
     def save(self, filepath: str, format: str = 'markdown') -> None:
         """Save report to file."""
         if format == 'markdown':
-            with open(filepath, 'w') as f:
+            with open(filepath, 'w', encoding='utf-8', errors='replace') as f:
                 f.write(self.to_markdown())
         elif format == 'json':
-            with open(filepath, 'w') as f:
+            with open(filepath, 'w', encoding='utf-8', errors='replace') as f:
                 json.dump(self.to_dict(), f, indent=2)
         else:
             raise ValueError(f"Unknown format: {format}")

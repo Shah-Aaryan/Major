@@ -108,7 +108,7 @@ class RandomSearchOptimizer(BaseOptimizer):
         """
         start_time = time.time()
         
-        logger.info(f"Starting Random Search with {self.n_iterations} iterations")
+        logger.info(f"Starting {self.name} with {self.n_iterations} iterations")
         
         for i in range(self.n_iterations):
             # Get next sample
@@ -126,7 +126,7 @@ class RandomSearchOptimizer(BaseOptimizer):
         total_time = time.time() - start_time
         
         logger.info(
-            f"Random Search complete: best={self.best_trial.objective_value:.4f}, "
+            f"{self.name} complete: best={self.best_trial.objective_value:.4f}, "
             f"time={total_time:.2f}s"
         )
         
