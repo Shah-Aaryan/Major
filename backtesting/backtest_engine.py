@@ -208,10 +208,24 @@ class BacktestEngine:
             BacktestResult with all metrics and trades
         """
         self._reset_state()
-        
-        # Set parameters if provided
+
+        # Reset strategy state between runs so results are reproducible and
+        # independent of prior backtests/optimizers.
+        if hasattr(strategy, "reset"):
+            try:
+                strategy.reset()
+            except Exception:
+                # Strategy reset is best-effort; backtest engine still proceeds.
+                pass
+
+        # Set parameters if provided.
+        # Important: many strategies separate base params (risk/execution) from
+        # strategy-specific params; use set_all_parameters when available.
         if parameters:
-            strategy.set_strategy_specific_params(parameters)
+            if hasattr(strategy, "set_all_parameters"):
+                strategy.set_all_parameters(parameters)
+            else:
+                strategy.set_strategy_specific_params(parameters)
         
         # Validate data
         required_cols = ['open', 'high', 'low', 'close', 'volume']

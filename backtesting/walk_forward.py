@@ -247,6 +247,17 @@ class WalkForwardValidator:
             if len(train_data) < min_train_size:
                 logger.warning(f"Skipping window {window.window_id}: insufficient training data")
                 continue
+
+            # === BASELINE BACKTEST (human params) ===
+            # Compute baseline FIRST so it is consistent across optimizers even
+            # when optimization fails for a window.
+            baseline_result = None
+            if self.baseline_params:
+                baseline_result = self.backtest_engine.run(
+                    self.strategy, test_data, self.baseline_params
+                )
+                window.baseline_test_metrics = baseline_result.metrics
+                baseline_equity_curves.append(baseline_result.equity_curve)
             
             # === OPTIMIZE ON TRAIN DATA ===
             try:
@@ -268,16 +279,9 @@ class WalkForwardValidator:
             )
             window.test_metrics = test_result.metrics
             test_equity_curves.append(test_result.equity_curve)
-            
-            # === BASELINE BACKTEST (human params) ===
-            if self.baseline_params:
-                baseline_result = self.backtest_engine.run(
-                    self.strategy, test_data, self.baseline_params
-                )
-                window.baseline_test_metrics = baseline_result.metrics
-                baseline_equity_curves.append(baseline_result.equity_curve)
-                
-                # Calculate improvement
+
+            # Calculate improvement vs baseline (if baseline was computed)
+            if baseline_result is not None and baseline_result.metrics is not None:
                 base_sharpe = float(getattr(baseline_result.metrics, "sharpe_ratio", 0.0) or 0.0)
                 test_sharpe = float(getattr(test_result.metrics, "sharpe_ratio", 0.0) or 0.0)
 

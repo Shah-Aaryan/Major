@@ -32,7 +32,12 @@ except ImportError:
 
 
 class CMAESOptimizer(BaseOptimizer):
-    """CMA-ES via Optuna's CMAESampler."""
+    """CMA-ES optimizer.
+
+    Prefers Optuna's `CmaEsSampler` when available. If the installed Optuna
+    version does not include a CMA-ES sampler, falls back to the standalone
+    `cmaes` package.
+    """
 
     def __init__(
         self,
@@ -56,38 +61,112 @@ class CMAESOptimizer(BaseOptimizer):
         self.name = "CMA-ES"
 
     def optimize(self, baseline_objective: Optional[float] = None) -> OptimizationResult:
-        directions = "maximize" if self.maximize else "minimize"
-        try:
-            sampler = optuna.samplers.CMAESampler(seed=self.random_state)
-        except ModuleNotFoundError as e:
-            # Optuna's CMA-ES sampler depends on the external `cmaes` package.
-            raise ImportError("CMA-ES requires the 'cmaes' package. Install with: pip install cmaes") from e
-        study = optuna.create_study(direction=directions, sampler=sampler)
-
-        def objective(trial: optuna.Trial) -> float:
-            params = {}
-            for name, spec in self.parameter_space.parameters.items():
-                if spec.param_type == ParameterType.INTEGER:
-                    params[name] = trial.suggest_int(name, int(spec.bounds[0]), int(spec.bounds[1]))
-                elif spec.param_type == ParameterType.FLOAT:
-                    params[name] = trial.suggest_float(name, spec.bounds[0], spec.bounds[1])
-                elif spec.param_type == ParameterType.CATEGORICAL:
-                    params[name] = trial.suggest_categorical(name, spec.categories)
-                elif spec.param_type == ParameterType.BOOLEAN:
-                    params[name] = trial.suggest_categorical(name, [True, False])
-            opt_trial = self.evaluate(params)
-            return opt_trial.objective_value
-
         start = time.time()
-        study.optimize(objective, n_trials=self.n_iterations, show_progress_bar=False)
-        total_time = time.time() - start
 
-        best = study.best_trial
-        self.best_trial = OptimizationTrial(
-            trial_id=best.number,
-            parameters=best.params,
-            objective_value=best.value,
-        )
+        # --- Path A: Optuna CMA-ES sampler (if supported) ---
+        if OPTUNA_AVAILABLE:
+            sampler_cls = (
+                getattr(optuna.samplers, "CmaEsSampler", None)
+                or getattr(optuna.samplers, "CMAESampler", None)
+            )
+            if sampler_cls is not None:
+                directions = "maximize" if self.maximize else "minimize"
+                try:
+                    sampler = sampler_cls(seed=self.random_state)
+                except ModuleNotFoundError as e:
+                    # Optuna's CMA-ES sampler depends on the external `cmaes` package.
+                    raise ImportError(
+                        "CMA-ES requires the 'cmaes' package. Install with: pip install cmaes"
+                    ) from e
+
+                study = optuna.create_study(direction=directions, sampler=sampler)
+
+                def objective(trial: optuna.Trial) -> float:
+                    params: Dict[str, Any] = {}
+                    for name, spec in self.parameter_space.parameters.items():
+                        if spec.param_type == ParameterType.INTEGER:
+                            params[name] = trial.suggest_int(name, int(spec.bounds[0]), int(spec.bounds[1]))
+                        elif spec.param_type == ParameterType.FLOAT:
+                            params[name] = trial.suggest_float(name, spec.bounds[0], spec.bounds[1])
+                        elif spec.param_type == ParameterType.CATEGORICAL:
+                            params[name] = trial.suggest_categorical(name, spec.categories)
+                        elif spec.param_type == ParameterType.BOOLEAN:
+                            params[name] = trial.suggest_categorical(name, [True, False])
+                    opt_trial = self.evaluate(params)
+                    return opt_trial.objective_value
+
+                study.optimize(objective, n_trials=self.n_iterations, show_progress_bar=False)
+                total_time = time.time() - start
+
+                best = study.best_trial
+                self.best_trial = OptimizationTrial(
+                    trial_id=best.number,
+                    parameters=best.params,
+                    objective_value=best.value,
+                )
+                return self._create_result(total_time=total_time, baseline_objective=baseline_objective)
+
+        # --- Path B: Standalone `cmaes` fallback ---
+        try:
+            from cmaes import CMA  # type: ignore
+        except Exception as e:
+            raise ImportError(
+                "CMA-ES fallback requires the 'cmaes' package. Install with: pip install cmaes"
+            ) from e
+
+        # Encode parameters into a continuous vector in [0, 1] and decode back.
+        names: List[str] = list(self.parameter_space.parameters.keys())
+        specs: List[Any] = [self.parameter_space.parameters[n] for n in names]
+
+        def decode(x01: np.ndarray) -> Dict[str, Any]:
+            decoded: Dict[str, Any] = {}
+            for i, (name, spec) in enumerate(zip(names, specs)):
+                u = float(np.clip(x01[i], 0.0, 1.0))
+                lo, hi = float(spec.bounds[0]), float(spec.bounds[1])
+                raw = lo + u * (hi - lo)
+                if spec.param_type == ParameterType.FLOAT:
+                    decoded[name] = float(raw)
+                elif spec.param_type == ParameterType.INTEGER:
+                    decoded[name] = int(round(raw))
+                elif spec.param_type == ParameterType.BOOLEAN:
+                    decoded[name] = bool(int(round(raw)) > 0)
+                elif spec.param_type == ParameterType.CATEGORICAL:
+                    if not spec.categories:
+                        decoded[name] = None
+                    else:
+                        idx = int(round(raw))
+                        idx = max(0, min(len(spec.categories) - 1, idx))
+                        decoded[name] = spec.categories[idx]
+                else:
+                    decoded[name] = raw
+            return decoded
+
+        dim = max(1, len(names))
+        popsize = max(8, min(32, 4 * dim))
+        optimizer = CMA(mean=np.full(dim, 0.5, dtype=float), sigma=0.2, population_size=popsize)
+
+        eval_count = 0
+        while eval_count < int(self.n_iterations):
+            solutions: List[np.ndarray] = []
+            fitnesses: List[float] = []
+            for _ in range(popsize):
+                if eval_count >= int(self.n_iterations):
+                    break
+                x = optimizer.ask()
+                x = np.asarray(x, dtype=float)
+                params = decode(x)
+                trial = self.evaluate(params)
+                eval_count += 1
+
+                # cmaes minimizes; convert if we are maximizing.
+                fit = -float(trial.objective_value) if self.maximize else float(trial.objective_value)
+                solutions.append(x)
+                fitnesses.append(fit)
+
+            if solutions:
+                optimizer.tell(solutions, fitnesses)
+
+        total_time = time.time() - start
         return self._create_result(total_time=total_time, baseline_objective=baseline_objective)
 
 

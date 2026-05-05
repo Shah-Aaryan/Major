@@ -493,10 +493,22 @@ class BaseStrategy(ABC):
     
     def set_all_parameters(self, params: Dict[str, Any]) -> None:
         """Set all parameters from dictionary."""
-        # Update base parameters
-        base_param_names = set(self.parameters.__dataclass_fields__.keys())
-        base_params = {k: v for k, v in params.items() if k in base_param_names}
-        self.parameters = StrategyParameters.from_dict(base_params)
+        # Preserve the concrete parameters class (many strategies use a
+        # StrategyParameters subclass with extra fields).
+        param_cls = type(self.parameters)
+
+        # Update parameters (base + strategy-specific dataclass fields)
+        field_names = set(getattr(param_cls, "__dataclass_fields__", {}).keys())
+        filtered = {k: v for k, v in params.items() if k in field_names}
+
+        # Most parameter classes inherit StrategyParameters and implement from_dict.
+        if hasattr(param_cls, "from_dict"):
+            self.parameters = param_cls.from_dict(filtered)  # type: ignore[attr-defined]
+        else:
+            # Fallback: set attributes on the existing object
+            for k, v in filtered.items():
+                if hasattr(self.parameters, k):
+                    setattr(self.parameters, k, v)
         
         # Update strategy-specific parameters
         self.set_strategy_specific_params(params)
