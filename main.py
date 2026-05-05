@@ -85,6 +85,71 @@ def setup_environment():
         Path(d).mkdir(parents=True, exist_ok=True)
 
 
+def prompt_for_strategy():
+    """Prompt user to select a strategy interactively."""
+    strategies = ['rsi_mean_reversion', 'ema_crossover', 'bollinger_breakout', 'custom']
+    descriptions = {
+        'rsi_mean_reversion': 'RSI Mean Reversion - Trades oversold/overbought conditions',
+        'ema_crossover': 'EMA Crossover - Trades EMA trend crossovers',
+        'bollinger_breakout': 'Bollinger Breakout - Trades price breakouts from bands',
+        'custom': 'Custom Algorithm - Enter your own trading rules as a string'
+    }
+    
+    print("\n" + "=" * 70)
+    print("AVAILABLE STRATEGIES")
+    print("=" * 70)
+    for i, strategy in enumerate(strategies, 1):
+        desc = descriptions.get(strategy, 'No description')
+        print(f"{i}. {strategy:25} - {desc}")
+    print("=" * 70 + "\n")
+    
+    while True:
+        try:
+            choice = input("Enter strategy number (1-4) or name: ").strip().lower()
+            
+            if choice.isdigit():
+                idx = int(choice) - 1
+                if 0 <= idx < len(strategies):
+                    selected = strategies[idx]
+                    print(f"\n✓ Selected: {selected}\n")
+                    return selected
+                else:
+                    print(f"❌ Please enter a number between 1 and {len(strategies)}\n")
+            elif choice in strategies:
+                print(f"\n✓ Selected: {choice}\n")
+                return choice
+            else:
+                print(f"❌ Strategy '{choice}' not found. Please try again.\n")
+        except KeyboardInterrupt:
+            print("\n\nExiting...")
+            sys.exit(0)
+        except Exception as e:
+            logger.error(f"Error reading input: {e}")
+            print("❌ Invalid input. Please try again.\n")
+
+
+def prompt_for_algorithm():
+    """Prompt user to enter custom algorithm string."""
+    print("\nEnter your trading algorithm as a string.")
+    print("Examples:")
+    print("  EMA20 < EMA50 AND price < EMA50")
+    print("  RSI crosses down from 45-60 AND volume > volume_ema_20")
+    print("  price breaks below lower_bollinger_band AND EMA20 < EMA50")
+    print("\nSupported syntax:")
+    print("  - Comparisons: <, >, <=, >=, ==, !=")
+    print("  - Crossovers: 'RSI crosses up/down from X-Y'")
+    print("  - Breaks: 'price breaks above/below [indicator]'")
+    print("  - Lookback: Add _1, _5, etc (e.g., RSI_1 for 1 bar ago)")
+    print("  - Logic: AND, OR")
+    print("  - Sell logic: Use 'SELL: [conditions]' for different exit rules\n")
+    
+    algorithm = input("Enter algorithm: ").strip()
+    if not algorithm:
+        print("❌ Algorithm cannot be empty")
+        return prompt_for_algorithm()
+    return algorithm
+
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -124,8 +189,17 @@ Examples:
     parser.add_argument(
         '--strategy',
         type=str,
-        choices=['rsi_mean_reversion', 'ema_crossover', 'bollinger_breakout'],
-        help='Strategy to test'
+        default=None,
+        help='Strategy to test (rsi_mean_reversion, ema_crossover, bollinger_breakout, or custom)'
+    )
+    
+    parser.add_argument(
+        '--algorithm',
+        type=str,
+        default=None,
+        help='''Custom trading algorithm (use with --strategy custom).
+                Example: EMA20 < EMA50 AND price < EMA50 AND RSI crosses down from 45-60
+                Use AND/OR to combine conditions, SELL: to specify sell conditions separately'''
     )
     
     parser.add_argument(
@@ -648,6 +722,7 @@ def run_hybrid_live(args):
         sample_rows=args.sample_rows,
         human_params_json=human_params_json,
         human_params_file=args.human_params_file,
+        algorithm=args.algorithm if hasattr(args, 'algorithm') else None,
     )
 
     print("\n" + "=" * 60)
@@ -678,6 +753,23 @@ def main():
     # Setup
     setup_environment()
     args = parse_args()
+    
+    # Interactive strategy selection if not provided
+    if not args.strategy and not args.all_strategies:
+        args.strategy = prompt_for_strategy()
+    
+    # Interactive algorithm input for custom strategy
+    if args.strategy == 'custom' and not args.algorithm:
+        args.algorithm = prompt_for_algorithm()
+    
+    # Validate custom strategy
+    if args.strategy == 'custom':
+        if not args.algorithm:
+            print("\n❌ ERROR: --strategy custom requires --algorithm parameter")
+            print("\nExample:")
+            print("  python main.py --data <file.csv> --strategy custom --algorithm \"EMA20 < EMA50 AND price < EMA50\"")
+            sys.exit(1)
+        print(f"\n✓ Custom Algorithm: {args.algorithm}\n")
     
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)

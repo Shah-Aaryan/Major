@@ -38,6 +38,7 @@ from optimization.optimizer_registry import get_optimizer_registry
 from strategies.bollinger_breakout import BollingerBreakoutStrategy
 from strategies.ema_crossover import EMACrossoverStrategy
 from strategies.rsi_mean_reversion import RSIMeanReversionStrategy
+from strategies.custom_strategy import CustomStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ _STRATEGY_FACTORY = {
     "rsi_mean_reversion": RSIMeanReversionStrategy,
     "ema_crossover": EMACrossoverStrategy,
     "bollinger_breakout": BollingerBreakoutStrategy,
+    "custom": CustomStrategy,
 }
 
 
@@ -331,6 +333,7 @@ def run_hybrid_live_optimization(
     sample_rows: int = 0,
     human_params_json: Optional[str] = None,
     human_params_file: Optional[str] = None,
+    algorithm: Optional[str] = None,
 ) -> HybridRunArtifacts:
     """Run the hybrid workflow for a single (symbol,timeframe,strategy)."""
 
@@ -419,7 +422,13 @@ def run_hybrid_live_optimization(
         )
 
     # Strategy + human params
-    strategy = _STRATEGY_FACTORY[strategy_name]()
+    if strategy_name == "custom":
+        if not algorithm:
+            raise ValueError("Custom strategy requires an algorithm string")
+        strategy = CustomStrategy(algorithm=algorithm)
+    else:
+        strategy = _STRATEGY_FACTORY[strategy_name]()
+    
     base_human = strategy.parameters.to_dict()
     overrides = _load_human_params(human_params_json, human_params_file)
     human_params = dict(base_human)

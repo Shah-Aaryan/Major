@@ -29,6 +29,7 @@ from strategies.base_strategy import (
 from strategies.rsi_mean_reversion import RSIMeanReversionStrategy, RSIMeanReversionParams
 from strategies.ema_crossover import EMACrossoverStrategy, EMACrossoverParams
 from strategies.bollinger_breakout import BollingerBreakoutStrategy, BollingerBreakoutParams
+from strategies.custom_strategy import CustomStrategy, CustomStrategyParams
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ class StrategyType(Enum):
     RSI_MEAN_REVERSION = "rsi_mean_reversion"
     EMA_CROSSOVER = "ema_crossover"
     BOLLINGER_BREAKOUT = "bollinger_breakout"
+    CUSTOM = "custom"
 
 
 @dataclass
