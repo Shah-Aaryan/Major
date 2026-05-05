@@ -223,6 +223,15 @@ def _optimizer_kwargs_for_method(
     if method_key == "grid_search":
         return {"grid_resolution": opt_config.grid_resolution}
 
+    if method_key in {"bayesian_gp", "bayesian_tpe"}:
+        # Keep Bayesian initial random samples <= budget so small --trials still runs.
+        n_initial_points = max(1, min(10, int(per_window_iters)))
+        backend = "skopt" if method_key == "bayesian_gp" else "optuna"
+        return {
+            "backend": backend,
+            "n_initial_points": n_initial_points,
+        }
+
     if method_key in {"random_search", "latin_hypercube", "sobol"}:
         strategy = (
             method_key
@@ -270,15 +279,20 @@ def _optimizer_kwargs_for_method(
         # Keep defaults but ensure reduction_factor is sane.
         return {"reduction_factor": 3}
 
+    if method_key in {"nsga_ii", "nsga_iii"}:
+        # Population-based; keep it modest for hybrid sweeps.
+        population_size = min(60, max(20, 5 * per_window_iters))
+        return {"population_size": population_size}
+
     return {}
 
 
 def _min_iters_required(method_key: str) -> int:
     """Minimum n_iterations needed for method to function."""
 
-    # skopt-based GP requires n_calls >= 10.
-    if method_key == "bayesian_gp":
-        return 10
+    # Allow small budgets; we clamp Bayesian n_initial_points in kwargs.
+    if method_key in {"bayesian_gp", "bayesian_tpe"}:
+        return 1
     return 1
 
 
@@ -511,12 +525,9 @@ def run_hybrid_live_optimization(
     )
 
     # Optimizer methods
+    # Run *all* implemented techniques in the registry, one after another.
     implemented = [spec for spec in get_optimizer_registry(status="implemented")]
-
-    # This hybrid flow is single-objective (returns one scalar score), so true
-    # multi-objective optimizers are not comparable here.
-    excluded = {"nsga_ii", "nsga_iii"}
-    method_keys = [spec.key for spec in implemented if spec.key not in excluded]
+    method_keys = [spec.key for spec in implemented]
 
     # Record per-method outcomes so the final report/JSON shows what ran.
     # status: success | skipped | failed
@@ -562,21 +573,16 @@ def run_hybrid_live_optimization(
                 # Respect overall budget: split trials across windows.
                 # Example: n_trials=20, wf_windows=5 -> 4 iterations per window.
                 base_per_window_iters = max(1, n_trials // max(1, wf_windows))
+                per_window_iters = base_per_window_iters
                 min_required = _min_iters_required(method_key)
-                if base_per_window_iters < min_required:
-                    logger.warning(
-                        "Skipping %s: per-window iterations=%s < required=%s. Increase --trials or reduce --wf-windows.",
+                if per_window_iters < min_required:
+                    logger.info(
+                        "Bumping %s per-window iterations from %s to %s to satisfy minimum.",
                         method_key,
-                        base_per_window_iters,
+                        per_window_iters,
                         min_required,
                     )
-                    method_results[method_key] = {
-                        "status": "skipped",
-                        "reason": f"insufficient_budget_per_window (iters={base_per_window_iters}, required={min_required})",
-                    }
-                    continue
-
-                per_window_iters = base_per_window_iters
+                    per_window_iters = min_required
                 explainability_report = None
 
                 def optimize_func(train_df: pd.DataFrame) -> Dict[str, Any]:
@@ -587,6 +593,106 @@ def run_hybrid_live_optimization(
                         per_window_iters=per_window_iters,
                         n_param_dims=n_param_dims,
                     )
+
+                    # NSGA-II/III are multi-objective in this codebase. For hybrid mode,
+                    # we still pick a single parameter set by preferring Sortino while
+                    # also minimizing drawdown.
+                    if method_key in {"nsga_ii", "nsga_iii"}:
+                        try:
+                            from optimization.base_optimizer import ParameterSpace
+                            from optimization.multi_objective_optimizer import (
+                                MultiObjectiveOptimizer,
+                                ObjectiveConfig,
+                                ObjectiveType,
+                            )
+
+                            space = ParameterSpace.from_strategy_bounds(param_bounds, adjuster.integer_params)
+
+                            def mo_objective(params: Dict[str, Any]) -> Dict[str, float]:
+                                # Reuse the same internal split logic as objective_func.
+                                n = len(train_df)
+                                if n >= 200:
+                                    internal_train = train_df.iloc[: int(n * 0.75)]
+                                    internal_val = train_df.iloc[int(n * 0.75) :]
+                                else:
+                                    internal_train = train_df
+                                    internal_val = train_df
+
+                                strategy.update_parameters(params)
+                                engine = BacktestEngine(config=bt_config)
+
+                                val_result = engine.run(strategy, internal_val)
+                                if val_result is None or val_result.metrics is None:
+                                    return {
+                                        ObjectiveType.SORTINO_RATIO.value: -1.0,
+                                        ObjectiveType.MAX_DRAWDOWN.value: 1.0,
+                                    }
+
+                                val_trades = len(val_result.trades) if getattr(val_result, "trades", None) else 0
+                                if val_trades < 2:
+                                    return {
+                                        ObjectiveType.SORTINO_RATIO.value: -0.5,
+                                        ObjectiveType.MAX_DRAWDOWN.value: 1.0,
+                                    }
+
+                                train_result = engine.run(strategy, internal_train)
+                                train_sharpe = (
+                                    float(getattr(train_result.metrics, "sharpe_ratio", 0.0) or 0.0)
+                                    if train_result and train_result.metrics
+                                    else 0.0
+                                )
+
+                                val_return = float(getattr(val_result.metrics, "total_return", 0.0) or 0.0)
+                                val_sharpe = float(getattr(val_result.metrics, "sharpe_ratio", 0.0) or 0.0)
+                                val_sortino = float(getattr(val_result.metrics, "sortino_ratio", 0.0) or 0.0)
+                                val_max_dd = abs(float(getattr(val_result.metrics, "max_drawdown", 0.0) or 0.0))
+                                val_win_rate = float(getattr(val_result.metrics, "win_rate", 0.0) or 0.0)
+
+                                # Apply the same penalties as the scalar objective by degrading Sortino.
+                                base_score = val_sortino if not np.isinf(val_sortino) and val_sortino != 0 else val_sharpe
+                                overfit_gap = max(0.0, train_sharpe - val_sharpe)
+                                overfit_penalty = overfit_gap * 0.5
+
+                                candles = len(internal_val)
+                                trade_density = val_trades / max(candles, 1)
+                                density_penalty = max(0.0, (trade_density - 0.1)) * 20.0
+
+                                dd_penalty = max(0.0, val_max_dd - 0.10) * 10.0
+                                win_penalty = max(0.0, 0.35 - val_win_rate) * 2.0
+
+                                penalized_sortino = base_score - overfit_penalty - density_penalty - dd_penalty - win_penalty
+                                if val_return < 0:
+                                    penalized_sortino = min(penalized_sortino, -0.5)
+
+                                return {
+                                    ObjectiveType.SORTINO_RATIO.value: float(penalized_sortino),
+                                    ObjectiveType.MAX_DRAWDOWN.value: float(val_max_dd),
+                                }
+
+                            objectives = [
+                                ObjectiveConfig(ObjectiveType.SORTINO_RATIO, weight=1.0, priority=1),
+                                ObjectiveConfig(ObjectiveType.MAX_DRAWDOWN, weight=1.0, priority=2),
+                            ]
+
+                            pop_size = int(extra_kwargs.get("population_size", 50))
+                            optimizer = MultiObjectiveOptimizer(
+                                parameter_space=space,
+                                objectives=objectives,
+                                objective_function=mo_objective,
+                                n_iterations=int(per_window_iters),
+                                population_size=pop_size,
+                                backend="optuna",
+                                random_state=None,
+                                verbose=False,
+                            )
+
+                            mo_result = optimizer.optimize()
+                            single = mo_result.to_single_objective_result(ObjectiveType.SORTINO_RATIO)
+                            return single.best_parameters or human_params
+                        except Exception as e:
+                            logger.warning("NSGA optimization failed (%s): %s", method_key, e)
+                            return human_params
+
                     result = adjuster.optimize_strategy(
                         strategy_name=strategy.__class__.__name__,
                         train_data=train_df,

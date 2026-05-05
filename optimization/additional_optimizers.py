@@ -57,7 +57,11 @@ class CMAESOptimizer(BaseOptimizer):
 
     def optimize(self, baseline_objective: Optional[float] = None) -> OptimizationResult:
         directions = "maximize" if self.maximize else "minimize"
-        sampler = optuna.samplers.CMAESampler(seed=self.random_state)
+        try:
+            sampler = optuna.samplers.CMAESampler(seed=self.random_state)
+        except ModuleNotFoundError as e:
+            # Optuna's CMA-ES sampler depends on the external `cmaes` package.
+            raise ImportError("CMA-ES requires the 'cmaes' package. Install with: pip install cmaes") from e
         study = optuna.create_study(direction=directions, sampler=sampler)
 
         def objective(trial: optuna.Trial) -> float:
@@ -272,7 +276,7 @@ class EvolutionStrategiesOptimizer(BaseOptimizer):
                 scored.append((trial.objective_value, child))
 
             # Select next parents (μ best)
-            scored.sort(reverse=self.maximize)
+            scored.sort(key=lambda item: item[0], reverse=self.maximize)
             parents = [child for _, child in scored[: self.mu]]
 
         total_time = time.time() - start

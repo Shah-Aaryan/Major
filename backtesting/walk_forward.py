@@ -296,10 +296,20 @@ class WalkForwardValidator:
                 f"test_sharpe={window.test_metrics.sharpe_ratio:.2f}, "
                 f"improvement={window.ml_improvement:.2%}"
             )
+
+        if not window_results or not test_equity_curves:
+            raise RuntimeError(
+                "Walk-forward produced no successful windows (all windows were skipped or failed during optimization/backtesting)"
+            )
         
         # Combine equity curves
         combined_equity = self._combine_equity_curves(test_equity_curves)
         combined_baseline = self._combine_equity_curves(baseline_equity_curves)
+
+        if combined_equity is None:
+            raise RuntimeError(
+                "Walk-forward produced no combined equity curve (no test equity curves to combine)"
+            )
         
         # Calculate aggregate metrics
         aggregate_test = calculate_all_metrics(combined_equity)

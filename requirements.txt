@@ -14,6 +14,7 @@ pandas-ta>=0.3.14b
 scikit-learn>=1.3.0
 scikit-optimize>=0.9.0  # Bayesian optimization
 optuna>=3.4.0  # Alternative Bayesian optimization
+cmaes>=0.10.0  # Required for Optuna's CMA-ES sampler
 deap>=1.4.1  # Evolutionary algorithms
 
 # Statistics & Analysis

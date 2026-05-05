@@ -388,15 +388,17 @@ class BaseOptimizer(ABC):
         """
         pass
     
-    @abstractmethod
     def suggest_next(self) -> Dict[str, Any]:
-        """
-        Suggest the next parameter set to evaluate.
-        
+        """Suggest the next parameter set to evaluate.
+
+        Some optimizers in this project override :meth:`optimize` directly and
+        do not use an iterative suggest/evaluate loop. For those, a default
+        random suggestion keeps the base class instantiable.
+
         Returns:
             Dictionary of parameter values
         """
-        pass
+        return self.parameter_space.sample_random(self.rng)
     
     def evaluate(
         self,
