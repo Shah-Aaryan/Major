@@ -314,6 +314,7 @@ def _run_backtest(strategy, data_with_features: pd.DataFrame, params: Dict[str, 
 class HybridRunArtifacts:
     result_json_path: str
     report_md_path: str
+    report_json_path: str
 
 
 def run_hybrid_live_optimization(
@@ -722,12 +723,18 @@ def run_hybrid_live_optimization(
                     baseline_params=human_params,
                 )
 
+                wf_log_dir = Path(output_dir) / "reports"
+                wf_log_dir.mkdir(parents=True, exist_ok=True)
+                wf_log_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                wf_log_path = wf_log_dir / f"walk_forward_{symbol}_{timeframe}_{strategy_name}_{method_key}_{wf_log_ts}.json"
+
                 wf = validator.run(
                     data=data_with_features,
                     n_windows=wf_windows,
                     train_ratio=wf_train_ratio,
                     anchored=True,   # Expanding window: each fold trains on ALL prior data
                     min_train_size=200,
+                    log_json_path=str(wf_log_path),
                 )
 
                 if wf is None or wf.aggregate_test_metrics is None:
@@ -842,6 +849,9 @@ def run_hybrid_live_optimization(
     report_path = reports_dir / f"HYBRID_{symbol}_{timeframe}_{strategy_name}_{ts}.md"
     report.save(str(report_path), format="markdown")
 
+    report_json_path = reports_dir / f"HYBRID_{symbol}_{timeframe}_{strategy_name}_{ts}.json"
+    report.save(str(report_json_path), format="json")
+
     result_path = out_dir / f"hybrid_session_{ts}.json"
     payload = {
         "timestamp": datetime.now().isoformat(),
@@ -875,6 +885,11 @@ def run_hybrid_live_optimization(
             json.dump(human_params, f, indent=2)
 
     logger.info("Hybrid result JSON: %s", result_path)
-    logger.info("Hybrid report: %s", report_path)
+    logger.info("Hybrid report (md): %s", report_path)
+    logger.info("Hybrid report (json): %s", report_json_path)
 
-    return HybridRunArtifacts(result_json_path=str(result_path), report_md_path=str(report_path))
+    return HybridRunArtifacts(
+        result_json_path=str(result_path),
+        report_md_path=str(report_path),
+        report_json_path=str(report_json_path),
+    )

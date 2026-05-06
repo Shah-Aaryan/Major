@@ -10,6 +10,7 @@ The key insight: Parameters optimized on past data may not work
 in the future. Walk-forward tests this systematically.
 """
 
+import json
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Any, Optional, Tuple, Callable
@@ -17,6 +18,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import logging
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from strategies.base_strategy import BaseStrategy
 from backtesting.backtest_engine import (
@@ -59,7 +61,10 @@ class WalkForwardWindow:
             'train_sharpe': self.train_metrics.sharpe_ratio if self.train_metrics else None,
             'test_sharpe': self.test_metrics.sharpe_ratio if self.test_metrics else None,
             'baseline_test_sharpe': self.baseline_test_metrics.sharpe_ratio if self.baseline_test_metrics else None,
-            'ml_improvement': self.ml_improvement
+            'ml_improvement': self.ml_improvement,
+            'train_metrics': self.train_metrics.to_dict() if self.train_metrics else None,
+            'test_metrics': self.test_metrics.to_dict() if self.test_metrics else None,
+            'baseline_test_metrics': self.baseline_test_metrics.to_dict() if self.baseline_test_metrics else None
         }
 
 
@@ -145,6 +150,22 @@ class WalkForwardResult:
         """Convert window results to DataFrame."""
         return pd.DataFrame([w.to_dict() for w in self.windows])
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert summary to dictionary."""
+        return {
+            "strategy_name": self.strategy_name,
+            "n_windows": self.n_windows,
+            "train_ratio": self.train_ratio,
+            "ml_helped_windows": self.ml_helped_windows,
+            "avg_ml_improvement": self.avg_ml_improvement,
+            "ml_consistency": self.ml_consistency,
+            "overfitting_ratio": self.overfitting_ratio,
+            "aggregate_train_metrics": self.aggregate_train_metrics.to_dict() if self.aggregate_train_metrics else None,
+            "aggregate_test_metrics": self.aggregate_test_metrics.to_dict() if self.aggregate_test_metrics else None,
+            "aggregate_baseline_metrics": self.aggregate_baseline_metrics.to_dict() if self.aggregate_baseline_metrics else None,
+            "windows": [w.to_dict() for w in self.windows],
+        }
+
 
 class WalkForwardValidator:
     """
@@ -205,7 +226,8 @@ class WalkForwardValidator:
         n_windows: int = 5,
         train_ratio: float = 0.8,
         anchored: bool = False,
-        min_train_size: int = 1000
+        min_train_size: int = 1000,
+        log_json_path: Optional[str] = None
     ) -> WalkForwardResult:
         """
         Run walk-forward analysis.
@@ -234,6 +256,25 @@ class WalkForwardValidator:
         window_results: List[WalkForwardWindow] = []
         test_equity_curves: List[pd.Series] = []
         baseline_equity_curves: List[pd.Series] = []
+
+        log_path: Optional[Path] = None
+        if log_json_path:
+            log_path = Path(log_json_path)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        def _append_json_record(path: Path, record: Dict[str, Any]) -> None:
+            existing: List[Dict[str, Any]] = []
+            if path.exists():
+                try:
+                    with path.open("r", encoding="utf-8") as f:
+                        existing = json.load(f)
+                    if not isinstance(existing, list):
+                        existing = []
+                except Exception:
+                    existing = []
+            existing.append(record)
+            with path.open("w", encoding="utf-8") as f:
+                json.dump(existing, f, indent=2, default=str)
         
         for window in windows:
             logger.info(
@@ -293,6 +334,18 @@ class WalkForwardValidator:
                     window.ml_improvement = float(np.tanh(test_sharpe / 2.0))
             
             window_results.append(window)
+
+            if log_path:
+                record = {
+                    "event": "walk_forward_window",
+                    "timestamp": datetime.now().isoformat(),
+                    "strategy_name": self.strategy.name,
+                    "window": window.to_dict(),
+                }
+                try:
+                    _append_json_record(log_path, record)
+                except Exception as e:
+                    logger.warning("Failed to write walk-forward window JSON: %s", e)
             
             logger.info(
                 f"Window {window.window_id}: "
@@ -339,6 +392,18 @@ class WalkForwardValidator:
         
         logger.info(f"Walk-forward analysis complete")
         logger.info(result.summary())
+
+        if log_path:
+            summary_record = {
+                "event": "walk_forward_summary",
+                "timestamp": datetime.now().isoformat(),
+                "strategy_name": self.strategy.name,
+                "summary": result.to_dict(),
+            }
+            try:
+                _append_json_record(log_path, summary_record)
+            except Exception as e:
+                logger.warning("Failed to write walk-forward summary JSON: %s", e)
         
         return result
     

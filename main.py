@@ -730,6 +730,7 @@ def run_hybrid_live(args):
     print("=" * 60)
     print(f"JSON: {artifacts.result_json_path}")
     print(f"Report: {artifacts.report_md_path}")
+    print(f"Report JSON: {artifacts.report_json_path}")
     print("(Edit human params and re-run using --human-params-file research_output/human_params_template.json)")
     print("=" * 60)
 

@@ -946,12 +946,17 @@ class ResearchPipeline:
         reports_dir = self.output_dir / "reports"
         reports_dir.mkdir(exist_ok=True)
         
-        filename = f"{symbol}_{timeframe}_{strategy_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-        filepath = reports_dir / filename
-        
-        report.save(str(filepath), format='markdown')
-        
-        return str(filepath)
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        base_name = f"{symbol}_{timeframe}_{strategy_name}_{ts}"
+
+        json_path = reports_dir / f"{base_name}.json"
+        report.save(str(json_path), format='json')
+
+        # Keep markdown output for backward compatibility.
+        md_path = reports_dir / f"{base_name}.md"
+        report.save(str(md_path), format='markdown')
+
+        return str(json_path)
     
     def _generate_overall_findings(self) -> Dict[str, Any]:
         """Generate overall research findings."""
