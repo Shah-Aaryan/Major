@@ -678,7 +678,12 @@ class MLParameterAdjuster:
 
         # Map registry keys to concrete classes/backends
         if method_key in {"bayesian_gp", "bayesian_tpe"}:
-            backend = 'optuna' if method_key == "bayesian_tpe" else kwargs.pop('backend', 'skopt')
+            # `backend` is sometimes provided by callers (e.g., hybrid mode).
+            # Pop it first to avoid passing duplicate kwargs.
+            if method_key == "bayesian_tpe":
+                backend = kwargs.pop('backend', 'optuna')
+            else:
+                backend = kwargs.pop('backend', 'skopt')
             return BayesianOptimizer(**common_args, backend=backend, **kwargs)
 
         if method_key in {"random_search", "latin_hypercube", "sobol"}:

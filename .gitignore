@@ -33,3 +33,5 @@ data/raw/
 .DS_Store
 Thumbs.db
 *.MD
+__pycache__/
+*.pyc
