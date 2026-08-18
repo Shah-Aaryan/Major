@@ -1,0 +1,15 @@
+{
+  "DATA_SOURCE": "dataset",
+  "SYMBOL": "BTCUSDT",
+  "TIMEFRAME": "1m",
+  "WINDOW_SIZE": 500,
+  "CSV_PATH": "./data/raw/OHLCV_Binance_BTC-USDT_D20170817T040000UTC-D20240404T115959UTC_1min.csv",
+  "REST_ENDPOINT": "https://api.binance.com/api/v3/klines",
+  "WEBSOCKET_ENDPOINT": "wss://stream.binance.com:9443/ws",
+  "USE_TESTNET": false,
+  "REST_TIMEOUT_SECONDS": 10.0,
+  "WS_RECONNECT_ATTEMPTS": 5,
+  "WS_RECONNECT_DELAY_SECONDS": 5.0,
+  "REPLAY_SPEED": 0,
+  "AUDIT_LOG_DIR": "./audit_logs"
+}

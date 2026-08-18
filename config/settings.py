@@ -356,9 +356,79 @@ class AuditConfig:
 
 
 @dataclass
+class MarketDataConfig:
+    """Single-file configuration for the market data provider layer.
+
+    This is the ONLY config surface needed to switch the whole pipeline
+    between historical dataset replay and live Binance spot market data
+    (see ``config/beyondalgo.json``). Flipping ``DATA_SOURCE`` between
+    ``"dataset"`` and ``"live"`` requires zero source code changes.
+    """
+
+    DATA_SOURCE: str = "dataset"  # "dataset" or "live"
+    SYMBOL: str = "BTCUSDT"
+    TIMEFRAME: str = "1m"
+    WINDOW_SIZE: int = 500
+    CSV_PATH: str = "./data/raw/OHLCV_Binance_BTC-USDT_D20170817T040000UTC-D20240404T115959UTC_1min.csv"
+    REST_ENDPOINT: str = "https://api.binance.com/api/v3/klines"
+    WEBSOCKET_ENDPOINT: str = "wss://stream.binance.com:9443/ws"
+    USE_TESTNET: bool = False
+    REST_TIMEOUT_SECONDS: float = 10.0
+    WS_RECONNECT_ATTEMPTS: int = 5
+    WS_RECONNECT_DELAY_SECONDS: float = 5.0
+    REPLAY_SPEED: float = 0.0
+    AUDIT_LOG_DIR: str = "./audit_logs"
+
+    def __post_init__(self) -> None:
+        """Validate config values eagerly so bad config fails at load time."""
+        if self.DATA_SOURCE not in ("dataset", "live"):
+            raise ValueError(
+                f"DATA_SOURCE must be 'dataset' or 'live', got {self.DATA_SOURCE!r}"
+            )
+        if self.WINDOW_SIZE <= 0:
+            raise ValueError(f"WINDOW_SIZE must be positive, got {self.WINDOW_SIZE}")
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "MarketDataConfig":
+        """Build a MarketDataConfig from a raw dict, ignoring unknown keys."""
+        from dataclasses import fields as _fields
+
+        known_fields = {f.name for f in _fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in known_fields}
+        return cls(**filtered)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a plain dict."""
+        from dataclasses import asdict as _asdict
+
+        return _asdict(self)
+
+
+def load_market_data_config(path: str = "config/beyondalgo.json") -> MarketDataConfig:
+    """Load the unified market-data configuration from a single JSON file.
+
+    Args:
+        path: Path to the JSON config file.
+
+    Returns:
+        A validated MarketDataConfig instance.
+
+    Raises:
+        FileNotFoundError: If the config file does not exist.
+        ValueError: If the config contains an invalid DATA_SOURCE or WINDOW_SIZE.
+    """
+    import json
+
+    with open(path, "r") as f:
+        data = json.load(f)
+
+    return MarketDataConfig.from_dict(data)
+
+
+@dataclass
 class ResearchConfig:
     """Master configuration combining all settings."""
-    
+
     data: DataConfig = field(default_factory=DataConfig)
     features: FeatureConfig = field(default_factory=FeatureConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
@@ -366,7 +436,8 @@ class ResearchConfig:
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
     realtime: RealTimeConfig = field(default_factory=RealTimeConfig)
     audit: AuditConfig = field(default_factory=AuditConfig)
-    
+    market_data: MarketDataConfig = field(default_factory=MarketDataConfig)
+
     # Research experiment settings
     random_seed: int = 42
     n_parallel_jobs: int = -1  # Use all cores

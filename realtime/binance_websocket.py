@@ -98,11 +98,12 @@ class BinanceWebSocket:
         use_testnet: bool = True,
         max_candles: int = 1000,
         reconnect_attempts: int = 5,
-        reconnect_delay: float = 5.0
+        reconnect_delay: float = 5.0,
+        ws_base_url: Optional[str] = None
     ):
         """
         Initialize WebSocket client.
-        
+
         Args:
             symbols: List of symbols to stream (e.g., ['BTCUSDT', 'ETHUSDT'])
             interval: Candle interval (1m, 5m, 15m, etc.)
@@ -110,6 +111,9 @@ class BinanceWebSocket:
             max_candles: Maximum candles to keep in memory per symbol
             reconnect_attempts: Max reconnection attempts
             reconnect_delay: Delay between reconnect attempts
+            ws_base_url: Optional override for the WebSocket base URL
+                (config-driven WEBSOCKET_ENDPOINT). Takes precedence over
+                ``use_testnet`` when set.
         """
         self.symbols = [s.lower() for s in symbols]
         self.interval = interval
@@ -117,7 +121,8 @@ class BinanceWebSocket:
         self.max_candles = max_candles
         self.reconnect_attempts = reconnect_attempts
         self.reconnect_delay = reconnect_delay
-        
+        self.ws_base_url = ws_base_url
+
         # State
         self.state = WebSocketState.DISCONNECTED
         self._candle_buffer: Dict[str, deque] = {
@@ -126,11 +131,12 @@ class BinanceWebSocket:
         self._current_candle: Dict[str, Optional[Candle]] = {
             s: None for s in self.symbols
         }
-        
+
         # Callbacks
         self._on_candle_callbacks: List[Callable[[str, Candle], None]] = []
         self._on_ticker_callbacks: List[Callable[[TickerUpdate], None]] = []
         self._on_error_callbacks: List[Callable[[Exception], None]] = []
+        self._on_disconnect_callbacks: List[Callable[[], None]] = []
         
         # Threading
         self._ws = None
@@ -158,6 +164,16 @@ class BinanceWebSocket:
     def on_error(self, callback: Callable[[Exception], None]) -> None:
         """Register callback for errors."""
         self._on_error_callbacks.append(callback)
+
+    def on_disconnect(self, callback: Callable[[], None]) -> None:
+        """Register callback fired once reconnection attempts are exhausted.
+
+        Unlike ``on_error`` (fired on every transient error, including ones
+        that will be retried), this fires exactly once when the connection
+        is permanently lost — the signal downstream code should use to
+        trigger failover (e.g. falling back to dataset mode).
+        """
+        self._on_disconnect_callbacks.append(callback)
     
     def start(self) -> None:
         """Start WebSocket connection in background thread."""
@@ -213,7 +229,8 @@ class BinanceWebSocket:
                 
                 # Build stream URL
                 streams = "/".join([f"{s}@kline_{self.interval}" for s in self.symbols])
-                url = f"{self.WS_TESTNET_URL if self.use_testnet else self.WS_BASE_URL}/{streams}"
+                base_url = self.ws_base_url or (self.WS_TESTNET_URL if self.use_testnet else self.WS_BASE_URL)
+                url = f"{base_url}/{streams}"
                 
                 async with websockets.connect(url) as ws:
                     self._ws = ws
@@ -243,6 +260,7 @@ class BinanceWebSocket:
         if self._running:
             self.state = WebSocketState.ERROR
             logger.error("Max reconnection attempts reached")
+            self._notify_disconnect()
     
     def _process_message(self, message: str) -> None:
         """Process incoming WebSocket message."""
@@ -314,6 +332,14 @@ class BinanceWebSocket:
                 callback(error)
             except Exception as e:
                 logger.error(f"Error callback failed: {e}")
+
+    def _notify_disconnect(self) -> None:
+        """Notify disconnect callbacks (permanent connection loss)."""
+        for callback in self._on_disconnect_callbacks:
+            try:
+                callback()
+            except Exception as e:
+                logger.error(f"Disconnect callback failed: {e}")
     
     def get_candles(self, symbol: str) -> pd.DataFrame:
         """Get historical candles as DataFrame."""

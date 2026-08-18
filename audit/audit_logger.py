@@ -48,12 +48,13 @@ class AuditEventType(Enum):
     CONDITION_DETECTED = "condition_detected"
     FAILURE_DETECTED = "failure_detected"
     REGIME_CHANGE = "regime_change"
-    
+
     # System events
     SESSION_START = "session_start"
     SESSION_END = "session_end"
     ERROR = "error"
     WARNING = "warning"
+    MARKET_DATA_FALLBACK = "market_data_fallback"
 
 
 @dataclass

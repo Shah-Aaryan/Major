@@ -41,6 +41,7 @@ class PerformanceMetrics:
     # Return metrics
     total_return: float = 0.0
     annualized_return: float = 0.0
+    cagr: float = 0.0  # Compound Annual Growth Rate (== annualized_return)
     excess_return: float = 0.0  # vs benchmark
     
     # Risk metrics
@@ -90,6 +91,7 @@ class PerformanceMetrics:
         return {
             'total_return': self.total_return,
             'annualized_return': self.annualized_return,
+            'cagr': self.cagr,
             'volatility': self.volatility,
             'max_drawdown': self.max_drawdown,
             'sharpe_ratio': self.sharpe_ratio,
@@ -467,7 +469,9 @@ def calculate_all_metrics(
     metrics.annualized_return = calculate_annualized_return(
         metrics.total_return, len(equity_curve), periods_per_year
     )
-    
+    metrics.cagr = metrics.annualized_return
+
+
     # Volatility
     metrics.volatility, metrics.annualized_volatility = calculate_volatility(
         returns, periods_per_year

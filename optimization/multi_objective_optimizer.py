@@ -570,7 +570,7 @@ class MultiObjectiveOptimizer:
             n_iterations=self.n_iterations
         )
     
-    def _sample_optuna(self, trial: optuna.Trial) -> Dict[str, Any]:
+    def _sample_optuna(self, trial: "optuna.Trial") -> Dict[str, Any]:
         """Sample parameters using Optuna trial."""
         params = {}
         

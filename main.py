@@ -316,7 +316,40 @@ Examples:
         default=60.0,
         help='Simulation speed multiplier (default: 60 = 1hr data per minute)'
     )
-    
+
+    # Autonomous ML pipeline loop (dataset replay or live Binance, config-driven)
+    parser.add_argument(
+        '--autonomous',
+        action='store_true',
+        help=(
+            'Run the autonomous ML pipeline loop: candle -> rolling window -> '
+            'features -> optimization -> parallel human/ML execution -> '
+            'portfolio/evaluation -> charts -> audit. Data source (dataset vs. '
+            'live Binance) is controlled entirely by --config-file.'
+        )
+    )
+
+    parser.add_argument(
+        '--config-file',
+        type=str,
+        default='config/beyondalgo.json',
+        help='Path to the unified market data config (default: config/beyondalgo.json)'
+    )
+
+    parser.add_argument(
+        '--max-cycles',
+        type=int,
+        default=None,
+        help='Autonomous mode: stop after N optimization cycles (default: run until data is exhausted)'
+    )
+
+    parser.add_argument(
+        '--optimization-interval',
+        type=int,
+        default=50,
+        help='Autonomous mode: re-optimize every N new closed candles (default: 50)'
+    )
+
     # Output arguments
     parser.add_argument(
         '--output', '-o',
@@ -709,6 +742,55 @@ def run_hybrid_live(args):
     return artifacts
 
 
+def run_autonomous_pipeline(args):
+    """Run the autonomous ML pipeline loop (dataset replay or live Binance).
+
+    Data source is decided entirely by DATA_SOURCE inside --config-file;
+    this function never branches on dataset-vs-live itself.
+    """
+    from config.settings import load_market_data_config
+    from pipeline.autonomous_loop import AutonomousPipeline
+
+    market_config = load_market_data_config(args.config_file)
+    strategy_name = args.strategy or 'rsi_mean_reversion'
+
+    logger.info(
+        f"Starting autonomous pipeline: source={market_config.DATA_SOURCE} "
+        f"symbol={market_config.SYMBOL} strategy={strategy_name} "
+        f"window_size={market_config.WINDOW_SIZE}"
+    )
+
+    pipeline = AutonomousPipeline(
+        market_config=market_config,
+        strategy_name=strategy_name,
+        optimization_interval=args.optimization_interval,
+        n_optimization_iterations=min(args.trials, 20) if args.quick else args.trials,
+        output_dir=args.output,
+    )
+
+    try:
+        results = pipeline.run(max_cycles=args.max_cycles)
+    except KeyboardInterrupt:
+        logger.info("Autonomous pipeline interrupted by user; shutting down cleanly")
+        pipeline.shutdown()
+        return pipeline
+
+    print("\n" + "=" * 60)
+    print("AUTONOMOUS PIPELINE COMPLETE")
+    print("=" * 60)
+    print(f"Data source: {market_config.DATA_SOURCE}")
+    print(f"Optimization cycles completed: {len(results)}")
+    if results:
+        last = results[-1]
+        print(f"Last regime: {last.regime}")
+        print(f"ML helped on last cycle: {last.ml_helped}")
+        print(f"Charts: {args.output}/charts/")
+    print(f"Audit logs: {args.output}/audit/")
+    print("=" * 60)
+
+    return pipeline
+
+
 def main():
     """Main entry point."""
     print("""
@@ -727,8 +809,9 @@ def main():
     setup_environment()
     args = parse_args()
     
-    # Interactive strategy selection if not provided
-    if not args.strategy and not args.all_strategies:
+    # Interactive strategy selection if not provided (skipped in autonomous
+    # mode, which defaults to rsi_mean_reversion so it stays non-interactive)
+    if not args.strategy and not args.all_strategies and not args.autonomous:
         args.strategy = prompt_for_strategy()
     
     # Interactive algorithm input for custom strategy
@@ -748,7 +831,9 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
     
     # Run appropriate mode
-    if args.paper_trade:
+    if args.autonomous:
+        run_autonomous_pipeline(args)
+    elif args.paper_trade:
         run_paper_trading(args)
     elif args.hybrid_live:
         run_hybrid_live(args)

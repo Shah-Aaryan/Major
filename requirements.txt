@@ -47,6 +47,11 @@ orjson>=3.9.0
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
 
+# Static Analysis
+mypy>=1.8.0
+flake8>=7.0.0
+pylint>=3.0.0
+
 # Blockchain Integration (optional - for audit anchoring)
 web3>=6.0.0  # Ethereum/Polygon interaction
 eth-account>=0.10.0  # Account management

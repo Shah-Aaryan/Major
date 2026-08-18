@@ -26,6 +26,11 @@ env/
 cache/
 .cache/
 
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
 # Raw data downloads
 data/raw/
 
