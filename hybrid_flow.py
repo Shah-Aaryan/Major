@@ -3,7 +3,7 @@
 Implements a workflow:
 1) Human provides baseline strategy parameters.
 2) Load historical OHLCV from CSV.
-3) Split into N windows; replace the last K windows with newest market data from CoinGecko.
+3) Split into N windows for walk-forward optimization.
 4) Generate features.
 5) Run all implemented single-objective optimizers, pick best.
 6) Backtest best ML params vs human params and generate a report.
@@ -86,8 +86,8 @@ def _load_human_params(human_params_json: Optional[str], human_params_file: Opti
 def _to_utc_naive_index(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize a DataFrame's DatetimeIndex to UTC-naive timestamps.
 
-    The historical CSV loader produces tz-aware UTC timestamps; CoinGecko timestamps
-    are typically tz-naive. Mixing them breaks concat/sort operations.
+    The historical CSV loader produces tz-aware UTC timestamps;
+    mixing aware and naive timestamps breaks concat/sort operations.
     """
 
     if df is None or df.empty:
@@ -140,7 +140,7 @@ def _replace_last_windows(
         return historical_ohlcv, meta
 
     if live_ohlcv.empty:
-        logger.warning("No live data from CoinGecko; keeping historical data unchanged")
+        logger.warning("No live data available; keeping historical data unchanged")
         return historical_ohlcv, meta
 
     live_tail = live_ohlcv.iloc[-min(replace_rows, len(live_ohlcv)) :].copy()
@@ -328,9 +328,6 @@ def run_hybrid_live_optimization(
     wf_windows: int,
     wf_train_ratio: float,
     replace_windows: int,
-    coingecko_days: int,
-    stream_seconds: int = 20,
-    stream_interval_seconds: float = 5.0,
     sample_rows: int = 0,
     human_params_json: Optional[str] = None,
     human_params_file: Optional[str] = None,
@@ -382,8 +379,8 @@ def run_hybrid_live_optimization(
             logger.info("Truncating dataset to last %s rows (requested sample_rows=%s)", sample_rows, sample_rows)
             raw = raw.iloc[-int(sample_rows):].copy()
 
-    # CoinGecko integration intentionally disabled for hybrid mode.
-    # Hybrid now runs purely on local historical data to avoid API-key/rate-limit issues.
+    # Live data injection point — currently uses local historical data only.
+    # When Binance live provider is active, live data can be injected here.
     live = pd.DataFrame()
     hybrid_raw, replace_meta = _replace_last_windows(
         historical_ohlcv=raw,
@@ -392,8 +389,8 @@ def run_hybrid_live_optimization(
         replace_windows=replace_windows,
     )
 
-    replace_meta["live_source"] = "disabled"
-    replace_meta["live_disabled_reason"] = "coingecko_removed_for_hybrid_mode"
+    replace_meta["live_source"] = "historical_only"
+    replace_meta["live_disabled_reason"] = "using_local_dataset"
 
     logger.info(
         "Hybrid window replace: %s",
@@ -863,7 +860,6 @@ def run_hybrid_live_optimization(
         "replace_meta": replace_meta,
         "wf_windows": wf_windows,
         "wf_train_ratio": wf_train_ratio,
-        "coingecko_days": coingecko_days,
         "human_params": human_params,
         "best_method": best_method,
         "best_score_sharpe": best_score,

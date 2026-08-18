@@ -270,8 +270,8 @@ Examples:
         '--hybrid-live',
         action='store_true',
         help=(
-            'Hybrid mode: start from human params, replace last N historical windows '
-            'with newest CoinGecko data, run all optimizers, and compare results'
+            'Hybrid mode: start from human params, run all optimizers '
+            'across walk-forward windows, and compare results'
         )
     )
 
@@ -279,32 +279,7 @@ Examples:
         '--hybrid-replace-windows',
         type=int,
         default=2,
-        help='How many of the last walk-forward windows to replace with CoinGecko data (default: 2)'
-    )
-
-    parser.add_argument(
-        '--coingecko-days',
-        type=int,
-        default=1,
-        help='How many days of CoinGecko data to pull for replacement (default: 1)'
-    )
-
-    parser.add_argument(
-        '--hybrid-stream-seconds',
-        type=int,
-        default=20,
-        help=(
-            'How many seconds to poll CoinGecko for current price samples and merge them '
-            'into the latest replacement data (default: 20). '
-            'Set 0 to disable this live-like sampling.'
-        )
-    )
-
-    parser.add_argument(
-        '--hybrid-stream-interval',
-        type=float,
-        default=5.0,
-        help='Seconds between CoinGecko polls during --hybrid-stream-seconds (default: 5.0)'
+        help='How many of the last walk-forward windows to replace with live data (default: 2)'
     )
 
     parser.add_argument(
@@ -716,9 +691,6 @@ def run_hybrid_live(args):
         wf_windows=args.wf_windows,
         wf_train_ratio=args.wf_train_ratio,
         replace_windows=args.hybrid_replace_windows,
-        coingecko_days=args.coingecko_days,
-        stream_seconds=args.hybrid_stream_seconds,
-        stream_interval_seconds=args.hybrid_stream_interval,
         sample_rows=args.sample_rows,
         human_params_json=human_params_json,
         human_params_file=args.human_params_file,
