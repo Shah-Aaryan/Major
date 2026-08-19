@@ -107,13 +107,8 @@ class EvolutionaryOptimizer(BaseOptimizer):
         
         self.name = f"Evolutionary(pop={population_size})"
         
-        if not DEAP_AVAILABLE:
-            raise ImportError(
-                "DEAP is not available. Install with: pip install deap"
-            )
-        
-        # Setup DEAP
-        self._setup_deap()
+        if DEAP_AVAILABLE:
+            self._setup_deap()
         
         # Evolution history
         self.generation_stats: List[Dict[str, float]] = []
@@ -293,6 +288,9 @@ class EvolutionaryOptimizer(BaseOptimizer):
         Returns:
             OptimizationResult with best parameters
         """
+        if not DEAP_AVAILABLE:
+            return self._optimize_native(baseline_objective)
+
         start_time = time.time()
         
         # Set random seed
@@ -421,6 +419,40 @@ class EvolutionaryOptimizer(BaseOptimizer):
     def get_evolution_history(self) -> pd.DataFrame:
         """Get evolution history as DataFrame."""
         return pd.DataFrame(self.generation_stats)
+
+    def _optimize_native(self, baseline_objective: Optional[float] = None) -> OptimizationResult:
+        """Native pure-python GA optimization when DEAP is not installed."""
+        start_time = time.time()
+        rng = np.random.default_rng(self.random_state)
+        
+        # Initialize population
+        pop = [self.parameter_space.sample_random(rng) for _ in range(self.population_size)]
+        
+        for gen in range(self.n_iterations):
+            evals = [(self.evaluate(ind), ind) for ind in pop]
+            evals.sort(key=lambda x: x[0].objective_value, reverse=self.maximize)
+            
+            new_pop = [ind for _, ind in evals[:max(1, self.elitism)]]
+            
+            while len(new_pop) < self.population_size:
+                idx1 = rng.integers(0, max(1, len(evals)))
+                idx2 = rng.integers(0, max(1, len(evals)))
+                p1, p2 = evals[idx1][1], evals[idx2][1]
+                
+                child = {}
+                for name, spec in self.parameter_space.parameters.items():
+                    val = p1[name] if rng.random() < 0.5 else p2[name]
+                    if spec.param_type in (ParameterType.FLOAT, ParameterType.INTEGER) and rng.random() < self.mutation_prob:
+                        span = spec.bounds[1] - spec.bounds[0]
+                        noisy = float(val) + float(rng.normal(0, 0.1 * span))
+                        noisy = float(np.clip(noisy, spec.bounds[0], spec.bounds[1]))
+                        val = int(round(noisy)) if spec.param_type == ParameterType.INTEGER else noisy
+                    child[name] = val
+                new_pop.append(child)
+            pop = new_pop
+            
+        total_time = time.time() - start_time
+        return self._create_result(total_time=total_time, baseline_objective=baseline_objective)
 
 
 class DifferentialEvolutionOptimizer(BaseOptimizer):

@@ -24,6 +24,19 @@ from analysis.failure_detector import FailureDetector, FailurePattern
 logger = logging.getLogger(__name__)
 
 
+def default_json_serializer(o: Any) -> Any:
+    """Helper serializer for NumPy, pandas, and datetime objects."""
+    if hasattr(o, 'item'):
+        return o.item()
+    if hasattr(o, 'to_dict'):
+        return o.to_dict()
+    if isinstance(o, (datetime, pd.Timestamp)):
+        return o.isoformat()
+    if pd.isna(o):
+        return None
+    return str(o)
+
+
 def _param_change_reason(param: str, human_val: Any, ml_val: Any) -> str:
     """Heuristic, human-readable rationale for a parameter change.
 
@@ -414,7 +427,7 @@ class ComparisonReport:
                 f.write(self.to_markdown())
         elif format == 'json':
             with open(filepath, 'w', encoding='utf-8', errors='replace') as f:
-                json.dump(self.to_dict(), f, indent=2)
+                json.dump(self.to_dict(), f, indent=2, default=default_json_serializer)
         else:
             raise ValueError(f"Unknown format: {format}")
         

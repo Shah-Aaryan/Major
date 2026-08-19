@@ -57,6 +57,19 @@ class AuditEventType(Enum):
     MARKET_DATA_FALLBACK = "market_data_fallback"
 
 
+def default_json_serializer(o: Any) -> Any:
+    """Helper serializer for NumPy, pandas, and datetime objects."""
+    if hasattr(o, 'item'):
+        return o.item()
+    if hasattr(o, 'to_dict'):
+        return o.to_dict()
+    if isinstance(o, (datetime, pd.Timestamp)):
+        return o.isoformat()
+    if pd.isna(o):
+        return None
+    return str(o)
+
+
 @dataclass
 class AuditEvent:
     """
@@ -86,7 +99,8 @@ class AuditEvent:
         }
     
     def to_json(self) -> str:
-        return json.dumps(self.to_dict())
+        return json.dumps(self.to_dict(), default=default_json_serializer)
+
 
 
 @dataclass
@@ -305,7 +319,8 @@ class AuditLogger:
         session_id: Optional[str] = None,
         log_to_file: bool = True,
         log_to_console: bool = False,
-        max_events_memory: int = 10000
+        max_events_memory: int = 10000,
+        audit_backend: str = "local"
     ):
         """
         Initialize audit logger.
@@ -316,12 +331,29 @@ class AuditLogger:
             log_to_file: Write logs to file
             log_to_console: Print logs to console
             max_events_memory: Max events to keep in memory
+            audit_backend: 'local' or 'blockchain' / 'hash_anchoring'
         """
         self.output_dir = Path(output_dir)
         self.session_id = session_id or self._generate_session_id()
         self.log_to_file = log_to_file
         self.log_to_console = log_to_console
         self.max_events_memory = max_events_memory
+        self.audit_backend = audit_backend
+        
+        # Pluggable blockchain anchoring backend
+        self.anchoring_service = None
+        if self.audit_backend.lower() in ("blockchain", "hash_anchoring"):
+            try:
+                from audit.hash_anchoring import HashAnchoringService
+                anchor_dir = self.output_dir / "anchors"
+                anchor_dir.mkdir(parents=True, exist_ok=True)
+                self.anchoring_service = HashAnchoringService(
+                    storage_path=str(anchor_dir),
+                    auto_anchor=True
+                )
+                logger.info("Initialized blockchain audit backend using HashAnchoringService")
+            except Exception as e:
+                logger.warning(f"Could not initialize HashAnchoringService for blockchain backend: {e}")
         
         # Event storage
         self._events: List[AuditEvent] = []
@@ -339,7 +371,7 @@ class AuditLogger:
         # Log session start
         self.log_event(
             AuditEventType.SESSION_START,
-            {'session_id': self.session_id},
+            {'session_id': self.session_id, 'audit_backend': self.audit_backend},
             explanation="Audit logging session started"
         )
     
@@ -389,6 +421,12 @@ class AuditLogger:
         
         if self.log_to_file:
             self._write_event_to_file(event)
+        
+        if self.anchoring_service is not None:
+            try:
+                self.anchoring_service.add_event(event.to_dict())
+            except Exception as e:
+                logger.warning(f"Error adding event to HashAnchoringService: {e}")
         
         return event
     
@@ -678,8 +716,15 @@ class AuditLogger:
                     'signals': [s.to_dict() for s in self._signal_audits],
                     'optimizations': [o.to_dict() for o in self._optimization_audits],
                     'parameters': [p.to_dict() for p in self._parameter_audits]
-                }, f, indent=2)
+                }, f, indent=2, default=default_json_serializer)
         
+        if self.anchoring_service is not None:
+            try:
+                tx_hash = self.anchoring_service.anchor_batch()
+                logger.info(f"Anchored audit batch on blockchain backend: tx={tx_hash}")
+            except Exception as e:
+                logger.warning(f"Error anchoring batch on close: {e}")
+
         logger.info(f"Audit logger closed. Session: {self.session_id}")
 
 

@@ -20,10 +20,14 @@ codebase (see ``config.settings.OptimizationConfig``).
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import pandas as pd
 
+from analysis.comparison_report import ComparisonReport, generate_full_report
+from analysis.condition_analyzer import ConditionAnalyzer
+from analysis.failure_detector import FailureDetector
 from audit.audit_logger import AuditEventType, AuditLogger, OptimizationAudit
 from backtesting.backtest_engine import BacktestConfig as BTConfig
 from backtesting.backtest_engine import BacktestEngine
@@ -67,6 +71,8 @@ class CycleResult:
     parameter_stability: Dict[str, float] = field(default_factory=dict)
     rolling_accuracy: Optional[float] = None
     chart_paths: Dict[str, str] = field(default_factory=dict)
+    report_path: Optional[str] = None
+    report: Optional[ComparisonReport] = None
 
 
 class AutonomousPipeline:
@@ -90,6 +96,7 @@ class AutonomousPipeline:
         min_optimization_rows: int = 100,
         output_dir: str = "./research_output",
         audit_logger: Optional[AuditLogger] = None,
+        audit_backend: str = "local",
     ):
         """
         Args:
@@ -109,6 +116,7 @@ class AutonomousPipeline:
             output_dir: Root directory for charts and audit logs.
             audit_logger: Optional pre-built AuditLogger (mainly for tests);
                 a new one is created under ``output_dir/audit`` otherwise.
+            audit_backend: Storage backend for audit logs (e.g., "local", "db").
         """
         if strategy_name not in STRATEGY_FACTORY:
             raise ValueError(
@@ -122,6 +130,8 @@ class AutonomousPipeline:
         self.n_optimization_iterations = n_optimization_iterations
         self.optimization_interval = optimization_interval
         self.min_optimization_rows = min_optimization_rows
+        self.output_dir = Path(output_dir)
+        self.audit_backend = audit_backend
 
         seed_strategy = self.strategy_cls()  # type: ignore[call-arg]
         self.human_params: Dict[str, Any] = human_params or seed_strategy.parameters.to_dict()
@@ -131,7 +141,7 @@ class AutonomousPipeline:
         self.ml_params: Dict[str, Any] = dict(self.human_params)
 
         self.audit_logger = audit_logger or AuditLogger(
-            output_dir=f"{output_dir}/audit", log_to_file=True, log_to_console=False
+            output_dir=f"{output_dir}/audit", log_to_file=True, log_to_console=False, audit_backend=self.audit_backend
         )
         self.provider: MarketDataProvider = create_provider(market_config, audit_logger=self.audit_logger)
         self.feature_engine = FeatureEngine(feature_config)
@@ -150,6 +160,7 @@ class AutonomousPipeline:
         self.prediction_log: List[str] = []
         self.actual_log: List[str] = []
         self.results: List[CycleResult] = []
+        self.latest_report: Optional[ComparisonReport] = None
 
     def _objective_function(self, _strategy_name: str, params: Dict[str, Any], data: pd.DataFrame) -> float:
         """Backtest ``params`` on ``data`` and score by Sharpe ratio."""
@@ -228,6 +239,25 @@ class AutonomousPipeline:
             "parameter_history": self.parameter_history,
         })
 
+        # Generate comprehensive comparison report
+        reports_dir = self.output_dir / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        report_stem = f"cycle_{self._cycle_index}_{int(datetime.now().timestamp())}"
+        report_md_path = str(reports_dir / f"{report_stem}.md")
+        report_json_path = str(reports_dir / f"{report_stem}.json")
+
+        report = generate_full_report(
+            strategy_name=self.strategy_cls.__name__,
+            human_results=execution.human_metrics.to_dict(),
+            ml_results=execution.ml_metrics.to_dict(),
+            human_params=self.human_params,
+            ml_params=self.ml_params,
+            data_period=f"Cycle {self._cycle_index} (Regime: {regime})",
+        )
+        report.save(report_md_path, format="markdown")
+        report.save(report_json_path, format="json")
+        self.latest_report = report
+
         result = CycleResult(
             cycle_index=self._cycle_index,
             timestamp=datetime.now(),
@@ -239,6 +269,8 @@ class AutonomousPipeline:
             parameter_stability=stability,
             rolling_accuracy=float(rolling_acc.iloc[-1]) if len(rolling_acc) else None,
             chart_paths=chart_paths,
+            report_path=report_md_path,
+            report=report,
         )
         self.results.append(result)
         return result
@@ -300,7 +332,33 @@ class AutonomousPipeline:
 
         return self.results
 
+    def generate_final_report(self) -> Optional[ComparisonReport]:
+        """Generate and save an aggregate final research comparison report across all completed cycles."""
+        if not self.results:
+            logger.warning("No cycle results available to generate final report.")
+            return None
+
+        latest_cycle = self.results[-1]
+        reports_dir = self.output_dir / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        final_md_path = str(reports_dir / "session_final_report.md")
+        final_json_path = str(reports_dir / "session_final_report.json")
+
+        final_report = generate_full_report(
+            strategy_name=self.strategy_cls.__name__,
+            human_results=latest_cycle.execution.human_metrics.to_dict(),
+            ml_results=latest_cycle.execution.ml_metrics.to_dict(),
+            human_params=self.human_params,
+            ml_params=self.ml_params,
+            data_period=f"Full Session ({len(self.results)} Cycles Completed)",
+        )
+        final_report.save(final_md_path, format="markdown")
+        final_report.save(final_json_path, format="json")
+        logger.info(f"Generated final session report at {final_md_path}")
+        return final_report
+
     def shutdown(self) -> None:
         """Release the market data provider and finalize the audit log."""
+        self.generate_final_report()
         self.provider.shutdown()
         self.audit_logger.close()

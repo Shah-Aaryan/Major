@@ -362,6 +362,58 @@ class ParameterAdjustmentResult:
         return insights
 
 
+class MultiObjectiveSingleAdapter(BaseOptimizer):
+    """Adapter to bridge MultiObjectiveOptimizer with BaseOptimizer interface."""
+    def __init__(
+        self,
+        parameter_space: ParameterSpace,
+        objective_function: Callable[[Dict[str, Any]], float],
+        maximize: bool = True,
+        n_iterations: int = 100,
+        random_state: Optional[int] = None,
+        verbose: bool = True,
+        **kwargs
+    ):
+        super().__init__(
+            parameter_space=parameter_space,
+            objective_function=objective_function,
+            maximize=maximize,
+            n_iterations=n_iterations,
+            random_state=random_state,
+            verbose=verbose
+        )
+        from optimization.multi_objective_optimizer import MultiObjectiveOptimizer, ObjectiveConfig, ObjectiveType
+        
+        def mo_obj_func(params: Dict[str, Any]) -> Dict[str, float]:
+            val = objective_function(params)
+            return {ObjectiveType.SHARPE_RATIO.value: val}
+            
+        objectives = [ObjectiveConfig(ObjectiveType.SHARPE_RATIO)]
+        self.mo_opt = MultiObjectiveOptimizer(
+            parameter_space=parameter_space,
+            objectives=objectives,
+            objective_function=mo_obj_func,
+            n_iterations=n_iterations,
+            random_state=random_state,
+            verbose=verbose
+        )
+        self.name = "MultiObjectiveNSGA"
+
+    def optimize(self, baseline_objective: Optional[float] = None) -> OptimizationResult:
+        import time
+        start_time = time.time()
+        mo_result = self.mo_opt.optimize()
+        from optimization.multi_objective_optimizer import ObjectiveType
+        single_res = mo_result.to_single_objective_result(ObjectiveType.SHARPE_RATIO)
+        from optimization.base_optimizer import OptimizationTrial
+        self.trials = single_res.trials
+        if self.trials:
+            self.best_trial = self.trials[0]
+        else:
+            self.best_trial = OptimizationTrial(0, single_res.best_parameters, single_res.best_objective)
+        return single_res
+
+
 class MLParameterAdjuster:
     """
     Central interface for ML-based parameter adjustment.
@@ -693,6 +745,10 @@ class MLParameterAdjuster:
             grid_args = dict(common_args)
             grid_args.pop('n_iterations', None)
             grid_args.pop('random_state', None)
+            if 'grid_resolution' not in kwargs:
+                n_params = max(1, len(parameter_space.parameters))
+                grid_res = max(2, int(round(n_iterations ** (1.0 / n_params))))
+                grid_args['grid_resolution'] = grid_res
             return GridSearchOptimizer(**grid_args, **kwargs)
 
         if method_key in {"genetic_algorithm"}:
@@ -726,7 +782,7 @@ class MLParameterAdjuster:
             return HyperbandASHAOptimizer(**hb_args, **kwargs)
 
         if method_key in {"nsga_ii", "nsga_iii"}:
-            return MultiObjectiveOptimizer(**common_args, **kwargs)
+            return MultiObjectiveSingleAdapter(**common_args, **kwargs)
 
         # Planned but not yet implemented (guard should prevent reaching here)
         raise ValueError(
