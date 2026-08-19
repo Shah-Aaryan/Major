@@ -12,6 +12,7 @@ No real trades are executed.
 """
 
 import logging
+import os
 from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Any, Optional, Callable
@@ -578,6 +579,56 @@ class PaperTrader:
             json.dump(data, f, indent=2)
         
         logger.info(f"Exported {len(self.closed_trades)} trades to {filepath}")
+
+    def save_state(self, filepath: str) -> None:
+        """Save full paper trader state (cash, positions, trades, equity) to JSON."""
+        with self._lock:
+            state = {
+                'initial_capital': self.initial_capital,
+                'cash': self.cash,
+                'max_positions': self.max_positions,
+                'slippage_pct': self.slippage_pct,
+                'commission_pct': self.commission_pct,
+                'positions': {sym: pos.to_dict() for sym, pos in self.positions.items()},
+                'closed_trades': [t.to_dict() for t in self.closed_trades],
+                'equity_curve': [{'timestamp': eq['timestamp'].isoformat() if isinstance(eq['timestamp'], datetime) else str(eq['timestamp']), 'equity': eq['equity']} for eq in self.equity_curve],
+                'stats': self._stats
+            }
+        with open(filepath, 'w') as f:
+            json.dump(state, f, indent=2)
+        logger.info(f"PaperTrader state saved to {filepath}")
+
+    def load_state(self, filepath: str) -> None:
+        """Restore PaperTrader state from JSON."""
+        if not os.path.exists(filepath):
+            logger.warning(f"State file {filepath} not found for loading")
+            return
+        with open(filepath, 'r') as f:
+            state = json.load(f)
+        with self._lock:
+            self.initial_capital = state.get('initial_capital', self.initial_capital)
+            self.cash = state.get('cash', self.cash)
+            self.max_positions = state.get('max_positions', self.max_positions)
+            self.slippage_pct = state.get('slippage_pct', self.slippage_pct)
+            self.commission_pct = state.get('commission_pct', self.commission_pct)
+            self._stats = state.get('stats', self._stats)
+            
+            # Restore positions
+            self.positions.clear()
+            for sym, pos_dict in state.get('positions', {}).items():
+                self.positions[sym] = PaperPosition(
+                    id=pos_dict['id'],
+                    symbol=pos_dict['symbol'],
+                    side=PositionSide(pos_dict['side']),
+                    entry_price=pos_dict['entry_price'],
+                    entry_time=datetime.fromisoformat(pos_dict['entry_time']),
+                    quantity=pos_dict['quantity'],
+                    current_price=pos_dict['current_price'],
+                    stop_loss=pos_dict.get('stop_loss'),
+                    take_profit=pos_dict.get('take_profit')
+                )
+        logger.info(f"PaperTrader state loaded from {filepath}")
+
 
 
 class PaperTradingSession:

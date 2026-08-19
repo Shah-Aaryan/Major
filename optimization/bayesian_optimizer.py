@@ -94,7 +94,11 @@ class BayesianOptimizer(BaseOptimizer):
             verbose=verbose
         )
         
-        self.n_initial_points = n_initial_points
+        if n_initial_points is None or n_initial_points >= n_iterations:
+            self.n_initial_points = max(1, min(10, n_iterations // 2))
+        else:
+            self.n_initial_points = min(n_initial_points, max(1, n_iterations - 1))
+            
         self.acq_func = acq_func
         
         # Select backend

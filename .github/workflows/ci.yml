@@ -1,0 +1,38 @@
+name: BeyondAlgo CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    name: Run Test Suite & Coverage
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run unit test suite
+        run: |
+          pytest --cov=. --cov-report=term-missing --cov-report=xml
+
+      - name: Run 15-Optimizer Benchmark Smoke Test
+        run: |
+          python cli.py benchmark-15 --iterations 5 --seeds 1 --output ./ci_benchmark_results

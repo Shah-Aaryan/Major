@@ -3,6 +3,12 @@
 .env.local
 .env.*.local
 
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.next/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -31,8 +37,11 @@ cache/
 htmlcov/
 .pytest_cache/
 
-# Raw data downloads
-data/raw/
+# Benchmark temporary output directories, runtime output & packages
+benchmark_15_results/
+benchmark_15_test/
+research_output/
+*.zip
 
 # OS
 .DS_Store
