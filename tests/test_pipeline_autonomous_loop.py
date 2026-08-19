@@ -175,3 +175,5 @@ class TestAutonomousPipelineFullRun:
         )
         pipeline.run()
         assert pipeline.provider.is_finished()
+        assert pipeline.run_cycle() is None
+        assert pipeline._current_regime(pd.DataFrame()) == "unknown"
